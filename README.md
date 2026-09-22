@@ -1,10 +1,12 @@
 # laya-rs
 
-**Typed decisions in one forward pass. Pure Rust, no Python, no server.**
+Use this crate to classify, score or check a piece of text from your Rust code: give it a message and a few questions, and it answers each one with a label, a score or a yes/no probability you can branch on. It helps with triaging support tickets, sorting emails, moderating posts, guarding prompts before they reach an LLM, and any other case where you need a reliable decision rather than generated text.
+
+**Typed decisions in one forward pass, in pure Rust.**
 
 Ask typed questions about any state (string, email, ticket, JSON) and get back a label, a score
-or a probability, each with a calibrated confidence. Nothing is generated, so nothing to parse and
-nothing to hallucinate.
+or a probability, each with a calibrated confidence. Because nothing is generated, the answer never
+needs parsing and cannot hallucinate.
 
 Pure-Rust port of [Laya](https://github.com/NandhaKishorM/laya). Loads Laya's checkpoints
 directly from the Hugging Face Hub via [candle](https://github.com/huggingface/candle).
@@ -92,7 +94,7 @@ where it can go and what it can sit inside of:
 
 - **A request-path middleware.** `predict` takes `&self`, so one checkpoint behind an `Arc`
   serves every worker of an axum, actix or tonic service. Screen prompts, route tickets or gate a
-  webhook inside the process that received it: no HTTP hop to a sidecar, no queue.
+  webhook inside the process that received it, without a round trip to a sidecar service.
 
   ```rust
   let agent = Arc::new(Agent::from_hub("convaiinnovations/laya", Some("english"))?);
@@ -105,7 +107,7 @@ where it can go and what it can sit inside of:
   }
   ```
 
-- **A single binary at the edge.** No interpreter, no virtualenv, no ONNX Runtime to ship. The
+- **A single binary at the edge.** There is no interpreter or runtime to ship alongside it. The
   crate, a weights directory and `Agent::from_dir` run on a box with no network, a kiosk, or a
   container whose image is the binary plus five files.
 
@@ -120,7 +122,7 @@ where it can go and what it can sit inside of:
 - **Batch jobs and shell pipelines.** The `laya` CLI reads questions as JSON and states from
   stdin, so a cron job or a `find | xargs laya predict` labels a corpus with no code at all.
 
-- **Confidence you can branch on.** Every answer is a distribution, not a string. The gating
+- **Confidence you can branch on.** Every answer comes back as a distribution rather than a string. The gating
   logic (escalate, retry, hand to a human) is ordinary Rust over ordinary numbers rather than a
   regex over generated prose.
 

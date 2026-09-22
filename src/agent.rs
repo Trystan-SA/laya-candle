@@ -6,18 +6,16 @@ use std::path::Path;
 use candle_core::Device;
 use indexmap::IndexMap;
 use serde_json::Value;
-use tokenizers::Tokenizer;
 
 use crate::answer::{Action, Answer, Prediction, Usage};
-use crate::calibration::{confidence_from_probs, round4, softmax, temp_bucket};
+use crate::calibration::{Calibration, confidence_from_probs, round4, softmax};
 use crate::checkpoint::Checkpoint;
 use crate::config::{AgentConfig, load_encoder_config};
 use crate::error::{Error, Result};
 use crate::model::DecisionModel;
-use crate::pyjson::serialize_state;
+use crate::pyjson;
 use crate::question::{QType, Questions};
-use crate::sequence;
-use crate::tokenizer::SpecialTokens;
+use crate::sequence::Encoder;
 
 /// Prefixes a usable checkpoint must define, so a mismatched file fails at load and not
 /// halfway through a prediction.
@@ -29,12 +27,9 @@ const REQUIRED_PREFIXES: [&str; 4] = ["encoder.", "type_emb.", "scorer.", "act_h
 /// [`predict`](Agent::predict) takes `&self`.
 pub struct Agent {
     model: DecisionModel,
-    tokenizer: Tokenizer,
-    special: SpecialTokens,
+    encoder: Encoder,
     config: AgentConfig,
-    temperature: Vec<f32>,
-    temperature_by_options: HashMap<String, f32>,
-    clamped_temperatures: Vec<String>,
+    calibration: Calibration,
     label: String,
 }
 
@@ -91,8 +86,8 @@ impl Agent {
             device,
         )?;
 
-        let (temperature, temperature_by_options, clamped_temperatures) = config.calibration();
-        if !clamped_temperatures.is_empty() {
+        let calibration = config.calibration();
+        if !calibration.clamped.is_empty() {
             eprintln!(
                 "[laya] {}: this checkpoint ships temperatures outside [{}, {}] which would \
                  distort confidence; clamping {}. Treat confidence from the affected buckets as \
@@ -100,18 +95,15 @@ impl Agent {
                 cp.label,
                 crate::calibration::TEMP_MIN,
                 crate::calibration::TEMP_MAX,
-                clamped_temperatures.join(", ")
+                calibration.clamped.join(", ")
             );
         }
 
         Ok(Self {
             model,
-            tokenizer,
-            special,
+            encoder: Encoder::new(tokenizer, special, config.max_len, config.head_max_len),
             config,
-            temperature,
-            temperature_by_options,
-            clamped_temperatures,
+            calibration,
             label: cp.label.clone(),
         })
     }
@@ -136,7 +128,7 @@ impl Agent {
     /// Confidence coming out of these buckets is not trustworthy; see
     /// [`crate::calibration::TEMP_MIN`].
     pub fn clamped_temperatures(&self) -> &[String] {
-        &self.clamped_temperatures
+        &self.calibration.clamped
     }
 
     /// Answer every question against `state`, in a single forward pass.
@@ -165,83 +157,50 @@ impl Agent {
         if questions.is_empty() {
             return Err(Error::Checkpoint("no questions to answer".into()));
         }
-        let state_text = serialize_state(state);
-        let max_len = self.config.max_len;
-        let head_max_len = self.config.head_max_len;
-
+        let state_ids = self.encoder.encode_state(&pyjson::render(state))?;
         let items = questions
             .iter()
-            .map(|(id, q)| {
-                sequence::build(
-                    &self.tokenizer,
-                    &self.special,
-                    &state_text,
-                    id,
-                    q,
-                    max_len,
-                    head_max_len,
-                    false,
-                )
-            })
+            .map(|(id, q)| self.encoder.build(&state_ids, id, q))
             .collect::<Result<Vec<_>>>()?;
 
-        let batch = sequence::collate(&items, self.special.pad_id);
+        let batch = self.encoder.collate(&items);
         let out = self.model.forward(&batch)?;
 
         let mut answers = IndexMap::with_capacity(questions.len());
         for (row, (id, q)) in questions.iter().enumerate() {
             let k = items[row].markers.len();
-            let scale = self
-                .temperature_by_options
-                .get(&temp_bucket(q.kind, k))
-                .copied()
-                .unwrap_or_else(|| self.temperature.get(q.kind.index()).copied().unwrap_or(1.0));
+            let scale = self.calibration.temperature(q.kind, k);
 
             let z: Vec<f32> = out.logits[row][..k].iter().map(|v| v / scale).collect();
             let p = softmax(&z);
             let confidence = round4(confidence_from_probs(&p, k));
             let action = Action { act_probability: round4(out.act_probs[row][0]) };
 
+            // Building the sequence already validated the criteria, so the lookups below cannot
+            // fail for a question that got this far.
             let answer = match q.kind {
                 QType::Choice => {
-                    let labels = q.labels(id)?;
+                    let probabilities = distribution(q.labels(id)?, &p);
                     let best = p
                         .iter()
                         .enumerate()
                         .max_by(|a, b| a.1.total_cmp(b.1))
                         .map(|(i, _)| i)
                         .unwrap_or(0);
-                    Answer::Choice {
-                        choice: labels[best].clone(),
-                        probabilities: labels
-                            .iter()
-                            .cloned()
-                            .zip(p.iter().map(|v| round4(*v)))
-                            .collect(),
-                        confidence,
-                        action,
-                    }
+                    let choice = probabilities
+                        .get_index(best)
+                        .map(|(label, _)| label.clone())
+                        .expect("one probability per option");
+                    Answer::Choice { choice, probabilities, confidence, action }
                 }
                 QType::Score => {
-                    let levels = q
-                        .criteria
-                        .as_ref()
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
+                    let labels = q.labels(id)?;
+                    let levels = q.score_levels(id)?;
                     let score = p.iter().enumerate().map(|(i, v)| i as f32 * v).sum::<f32>();
                     Answer::Score {
                         score: round4(score),
-                        legend: levels
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, c)| (i.to_string(), c))
-                            .collect(),
-                        probabilities: p
-                            .iter()
-                            .enumerate()
-                            .map(|(i, v)| (i.to_string(), round4(*v)))
-                            .collect(),
+                        legend: labels.iter().cloned().zip(levels.iter().cloned()).collect(),
+                        probabilities: distribution(labels, &p),
                         confidence,
                         action,
                     }
@@ -265,6 +224,11 @@ impl Agent {
             routing: None,
         })
     }
+}
+
+/// One rounded probability per label, in marker order.
+fn distribution(labels: Vec<String>, p: &[f32]) -> IndexMap<String, f32> {
+    labels.into_iter().zip(p.iter().map(|v| round4(*v))).collect()
 }
 
 /// Fail early, and say what is actually wrong, when a file is not a decision checkpoint.

@@ -21,16 +21,38 @@ pub struct Checkpoint {
     pub label: String,
 }
 
+const AGENT_CONFIG: &str = "rl_agent_config.json";
+const WEIGHTS: &str = "model.safetensors";
+const ENCODER_CONFIG: &str = "encoder/config.json";
+const TOKENIZER: &str = "tokenizer/tokenizer.json";
+/// Optional: a `tokenizer.json` that carries its own special tokens does not need one.
+const TOKENIZER_CONFIG: &str = "tokenizer/tokenizer_config.json";
+
 /// The files a checkpoint is made of, relative to its root.
-pub(crate) const FILES: [&str; 5] = [
-    "rl_agent_config.json",
-    "model.safetensors",
-    "encoder/config.json",
-    "tokenizer/tokenizer.json",
-    "tokenizer/tokenizer_config.json",
-];
+pub(crate) const FILES: [&str; 5] = [AGENT_CONFIG, WEIGHTS, ENCODER_CONFIG, TOKENIZER, TOKENIZER_CONFIG];
+
+/// How a Hub checkpoint names itself: the repository, plus the subfolder when it has one.
+pub(crate) fn hub_label(repo: &str, subfolder: Option<&str>) -> String {
+    match subfolder {
+        Some(s) => format!("{repo}/{s}"),
+        None => repo.to_string(),
+    }
+}
 
 impl Checkpoint {
+    /// Resolve every file through `fetch`, which fails for a file it cannot find.
+    fn assemble(label: String, mut fetch: impl FnMut(&str) -> Result<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            agent_config: fetch(AGENT_CONFIG)?,
+            weights: fetch(WEIGHTS)?,
+            encoder_config: fetch(ENCODER_CONFIG)?,
+            tokenizer: fetch(TOKENIZER)?,
+            // A missing optional file must not fail the whole load.
+            tokenizer_config: fetch(TOKENIZER_CONFIG).ok(),
+            label,
+        })
+    }
+
     /// Resolve a checkpoint laid out as a directory.
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
@@ -41,7 +63,7 @@ impl Checkpoint {
                 dir.display()
             )));
         }
-        let required = |name: &str| -> Result<PathBuf> {
+        Self::assemble(dir.display().to_string(), |name| {
             let p = dir.join(name);
             if p.exists() {
                 Ok(p)
@@ -52,70 +74,40 @@ impl Checkpoint {
                     FILES.join(", ")
                 )))
             }
-        };
-        let tokenizer_config = dir.join("tokenizer/tokenizer_config.json");
-        Ok(Self {
-            agent_config: required("rl_agent_config.json")?,
-            weights: required("model.safetensors")?,
-            encoder_config: required("encoder/config.json")?,
-            tokenizer: required("tokenizer/tokenizer.json")?,
-            tokenizer_config: tokenizer_config.exists().then_some(tokenizer_config),
-            label: dir.display().to_string(),
         })
     }
 }
 
+/// How a checkpoint is fetched from the Hub.
 #[cfg(feature = "hub")]
-mod hub {
-    use super::*;
-    use hf_hub::api::sync::ApiBuilder;
-
-    /// How a checkpoint is fetched from the Hub.
-    #[derive(Clone, Debug, Default)]
-    pub struct HubOptions {
-        /// A Hub token, for private repositories. Falls back to `HF_TOKEN`.
-        pub token: Option<String>,
-        /// Print a progress bar while downloading.
-        pub progress: bool,
-    }
-
-    impl Checkpoint {
-        /// Download a checkpoint from the Hub, or reuse the local Hub cache.
-        ///
-        /// `subfolder` picks one checkpoint out of a repository that bundles several, the way
-        /// `convaiinnovations/laya` bundles `multilingual` and `typed-decisions` alongside the
-        /// English one at its root. Only the requested subfolder is fetched.
-        pub fn from_hub(repo: &str, subfolder: Option<&str>, opts: &HubOptions) -> Result<Self> {
-            let api = ApiBuilder::new()
-                .with_progress(opts.progress)
-                .with_token(opts.token.clone().or_else(|| std::env::var("HF_TOKEN").ok()))
-                .build()
-                .map_err(|e| Error::Hub(e.to_string()))?
-                .model(repo.to_string());
-
-            let prefix = subfolder.map(|s| format!("{s}/")).unwrap_or_default();
-            let label = match subfolder {
-                Some(s) => format!("{repo}/{s}"),
-                None => repo.to_string(),
-            };
-            let fetch = |name: &str| -> Result<PathBuf> {
-                api.get(&format!("{prefix}{name}"))
-                    .map_err(|e| Error::Hub(format!("{label}: could not fetch {name}: {e}")))
-            };
-
-            Ok(Self {
-                agent_config: fetch("rl_agent_config.json")?,
-                weights: fetch("model.safetensors")?,
-                encoder_config: fetch("encoder/config.json")?,
-                tokenizer: fetch("tokenizer/tokenizer.json")?,
-                // Optional: a checkpoint whose tokenizer.json carries its own special tokens
-                // does not need one, and a missing file must not fail the whole load.
-                tokenizer_config: fetch("tokenizer/tokenizer_config.json").ok(),
-                label,
-            })
-        }
-    }
+#[derive(Clone, Debug, Default)]
+pub struct HubOptions {
+    /// A Hub token, for private repositories. Falls back to `HF_TOKEN`.
+    pub token: Option<String>,
+    /// Print a progress bar while downloading.
+    pub progress: bool,
 }
 
 #[cfg(feature = "hub")]
-pub use hub::HubOptions;
+impl Checkpoint {
+    /// Download a checkpoint from the Hub, or reuse the local Hub cache.
+    ///
+    /// `subfolder` picks one checkpoint out of a repository that bundles several, the way
+    /// `convaiinnovations/laya` bundles `multilingual` and `typed-decisions` alongside the
+    /// English one at its root. Only the requested subfolder is fetched.
+    pub fn from_hub(repo: &str, subfolder: Option<&str>, opts: &HubOptions) -> Result<Self> {
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_progress(opts.progress)
+            .with_token(opts.token.clone().or_else(|| std::env::var("HF_TOKEN").ok()))
+            .build()
+            .map_err(|e| Error::Hub(e.to_string()))?
+            .model(repo.to_string());
+
+        let prefix = subfolder.map(|s| format!("{s}/")).unwrap_or_default();
+        let label = hub_label(repo, subfolder);
+        Self::assemble(label.clone(), |name| {
+            api.get(&format!("{prefix}{name}"))
+                .map_err(|e| Error::Hub(format!("{label}: could not fetch {name}: {e}")))
+        })
+    }
+}

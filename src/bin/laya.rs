@@ -122,7 +122,7 @@ fn route(args: RouteArgs) -> anyhow::Result<()> {
 fn show_presets(name: Option<String>) -> anyhow::Result<()> {
     match name {
         None => {
-            for n in presets::NAMES {
+            for n in presets::names() {
                 let qs = presets::by_name(n).expect("a listed preset always resolves");
                 let ids: Vec<&str> = qs.iter().map(|(id, _)| id.as_str()).collect();
                 println!("{n:<12} {}", ids.join(", "));
@@ -130,44 +130,46 @@ fn show_presets(name: Option<String>) -> anyhow::Result<()> {
         }
         Some(n) => {
             let qs = presets::by_name(&n)
-                .with_context(|| format!("unknown preset {n:?}; try one of {}", presets::NAMES.join(", ")))?;
+                .with_context(|| format!("unknown preset {n:?}; try one of {}", preset_names()))?;
             println!("{}", serde_json::to_string_pretty(&qs)?);
         }
     }
     Ok(())
 }
 
+fn preset_names() -> String {
+    presets::names().collect::<Vec<_>>().join(", ")
+}
+
+/// `-` reads stdin and `@path` reads that file; anything else is `None`, for the caller to take
+/// literally.
+fn read_source(arg: &str) -> anyhow::Result<Option<String>> {
+    if arg == "-" {
+        return read_stdin().map(Some);
+    }
+    match arg.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).with_context(|| format!("reading {path}")).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// A state is literal text unless it names a file or stdin, in which case JSON is tried first.
 fn read_state(arg: &str) -> anyhow::Result<Value> {
-    let raw = match arg {
-        "-" => read_stdin()?,
-        _ => match arg.strip_prefix('@') {
-            Some(path) => {
-                std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?
-            }
-            None => return Ok(Value::String(arg.to_string())),
-        },
-    };
-    Ok(serde_json::from_str(&raw).unwrap_or(Value::String(raw)))
+    Ok(match read_source(arg)? {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
+        None => Value::String(arg.to_string()),
+    })
 }
 
 fn read_questions(arg: &str) -> anyhow::Result<Questions> {
-    let raw = match arg {
-        "-" => read_stdin()?,
-        _ => match arg.strip_prefix('@') {
-            Some(path) => {
-                std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?
-            }
-            None => {
-                return presets::by_name(arg).with_context(|| {
-                    format!(
-                        "{arg:?} is neither a preset nor a file; presets are {}, and a file is \
-                         given as @path.json",
-                        presets::NAMES.join(", ")
-                    )
-                });
-            }
-        },
+    let Some(raw) = read_source(arg)? else {
+        return presets::by_name(arg).with_context(|| {
+            format!(
+                "{arg:?} is neither a preset nor a file; presets are {}, and a file is given as \
+                 @path.json",
+                preset_names()
+            )
+        });
     };
     let questions = Questions::from_json(&raw)?;
     if questions.is_empty() {

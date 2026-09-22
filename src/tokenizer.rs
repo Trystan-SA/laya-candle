@@ -27,10 +27,7 @@ pub fn load(tok_path: &Path, cfg_path: Option<&Path>) -> Result<(Tokenizer, Spec
     })?;
 
     let cfg: Value = match cfg_path {
-        Some(path) => {
-            let raw = std::fs::read_to_string(path).map_err(|e| Error::io(path.display(), e))?;
-            serde_json::from_str(&raw).map_err(|e| Error::json(path.display(), e))?
-        }
+        Some(path) => crate::error::read_json(path)?,
         None => Value::Null,
     };
 

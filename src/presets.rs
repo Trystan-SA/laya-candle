@@ -176,20 +176,27 @@ pub fn model_router() -> Questions {
         )
 }
 
+/// Every preset, under the name [`by_name`] knows it by.
+const PRESETS: [(&str, fn() -> Questions); 5] = [
+    ("triage", triage),
+    ("email", || email(None)),
+    ("guard", guard),
+    ("moderation", moderation),
+    ("router", model_router),
+];
+
 /// Look a preset up by name, for a CLI or a config file.
 pub fn by_name(name: &str) -> Option<Questions> {
-    match name.trim().to_lowercase().replace('-', "_").as_str() {
-        "triage" => Some(triage()),
-        "email" => Some(email(None)),
-        "guard" => Some(guard()),
-        "moderation" => Some(moderation()),
-        "router" | "model_router" => Some(model_router()),
-        _ => None,
-    }
+    let key = name.trim().to_lowercase().replace('-', "_");
+    // The function is `model_router`; the listing calls it `router`. Both resolve.
+    let key = if key == "model_router" { "router" } else { key.as_str() };
+    PRESETS.iter().find(|(n, _)| *n == key).map(|(_, make)| make())
 }
 
-/// Every preset name [`by_name`] accepts.
-pub const NAMES: [&str; 5] = ["triage", "email", "guard", "moderation", "router"];
+/// Every preset name [`by_name`] accepts, in listing order.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    PRESETS.iter().map(|(n, _)| *n)
+}
 
 #[cfg(test)]
 mod tests {
@@ -197,13 +204,14 @@ mod tests {
 
     #[test]
     fn every_listed_preset_resolves_and_renders() {
-        for name in NAMES {
+        for name in names() {
             let qs = by_name(name).unwrap_or_else(|| panic!("{name} is listed but not resolvable"));
             assert!(!qs.is_empty());
             for (id, q) in qs.iter() {
                 assert!(!q.render_options(id).unwrap().is_empty());
             }
         }
+        assert!(by_name("model-router").is_some());
     }
 
     #[test]

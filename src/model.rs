@@ -10,6 +10,7 @@ use candle_nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module, VarBuilde
 use candle_transformers::models::modernbert;
 
 use crate::error::Result;
+use crate::question::QType;
 
 /// Everything in this crate runs in f32.
 ///
@@ -160,7 +161,7 @@ impl DecisionModel {
         Ok(Self {
             encoder,
             head,
-            type_emb: candle_nn::embedding(3, hidden, vb.pp("type_emb"))?,
+            type_emb: candle_nn::embedding(QType::ALL.len(), hidden, vb.pp("type_emb"))?,
             scorer_norm: layer_norm(hidden, vb.pp("scorer.0"))?,
             scorer_fc1: candle_nn::linear(hidden, hidden, vb.pp("scorer.1"))?,
             scorer_fc2: candle_nn::linear(hidden, 1, vb.pp("scorer.3"))?,

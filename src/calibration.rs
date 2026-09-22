@@ -1,5 +1,6 @@
 //! Turning raw marker logits into calibrated probabilities.
 
+use crate::config::AgentConfig;
 use crate::question::QType;
 
 /// A fitted temperature below 1 sharpens the logits instead of softening them.
@@ -17,18 +18,94 @@ pub fn clamp_temperature(t: f32) -> f32 {
     if !t.is_finite() { 1.0 } else { t.clamp(TEMP_MIN, TEMP_MAX) }
 }
 
+/// The option-count bucket a temperature is fitted for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionBucket {
+    Two,
+    ThreeToFive,
+    SixToTen,
+    ElevenPlus,
+}
+
+impl OptionBucket {
+    pub const ALL: [OptionBucket; 4] =
+        [OptionBucket::Two, OptionBucket::ThreeToFive, OptionBucket::SixToTen, OptionBucket::ElevenPlus];
+
+    /// The bucket a question with `k` options falls into.
+    pub fn from_count(k: usize) -> Self {
+        match k {
+            0..=2 => OptionBucket::Two,
+            3..=5 => OptionBucket::ThreeToFive,
+            6..=10 => OptionBucket::SixToTen,
+            _ => OptionBucket::ElevenPlus,
+        }
+    }
+
+    /// The bucket's name in `temperature_by_options` keys.
+    pub fn name(self) -> &'static str {
+        match self {
+            OptionBucket::Two => "2",
+            OptionBucket::ThreeToFive => "3-5",
+            OptionBucket::SixToTen => "6-10",
+            OptionBucket::ElevenPlus => "11+",
+        }
+    }
+}
+
 /// The calibration bucket a question falls into: `"<type>:<option-count>"`.
 pub fn temp_bucket(kind: QType, k: usize) -> String {
-    let size = if k <= 2 {
-        "2"
-    } else if k <= 5 {
-        "3-5"
-    } else if k <= 10 {
-        "6-10"
-    } else {
-        "11+"
-    };
-    format!("{}:{size}", kind.name())
+    format!("{}:{}", kind.name(), OptionBucket::from_count(k).name())
+}
+
+/// The reverse of [`temp_bucket`]; `None` for a key this crate does not know.
+fn parse_bucket(key: &str) -> Option<(QType, OptionBucket)> {
+    let (kind, bucket) = key.split_once(':')?;
+    let kind = QType::ALL.into_iter().find(|q| q.name() == kind)?;
+    let bucket = OptionBucket::ALL.into_iter().find(|b| b.name() == bucket)?;
+    Some((kind, bucket))
+}
+
+/// A checkpoint's temperatures, clamped and resolved once at load.
+///
+/// A question's temperature is its `"<type>:<bucket>"` entry when the checkpoint ships one, else
+/// the per-type value, else 1.0. The reference implementation applies that precedence on every
+/// prediction; here it is folded into one table so the hot path only indexes.
+#[derive(Clone, Debug)]
+pub struct Calibration {
+    table: [[f32; OptionBucket::ALL.len()]; QType::ALL.len()],
+    /// Every shipped temperature that had to be clamped, as `"<bucket>=<value>"`.
+    pub clamped: Vec<String>,
+}
+
+impl Calibration {
+    pub fn from_config(cfg: &AgentConfig) -> Self {
+        let mut clamped = Vec::new();
+        let mut clamp = |label: String, t: f32| {
+            let c = clamp_temperature(t);
+            if c != t {
+                clamped.push(format!("{label}={t:.4}"));
+            }
+            c
+        };
+
+        let mut table = [[1.0f32; OptionBucket::ALL.len()]; QType::ALL.len()];
+        for kind in QType::ALL {
+            if let Some(&t) = cfg.temperature.get(kind.index()) {
+                table[kind.index()] = [clamp(format!("temperature[{}]", kind.index()), t); OptionBucket::ALL.len()];
+            }
+        }
+        for (key, &t) in &cfg.temperature_by_options {
+            if let Some((kind, bucket)) = parse_bucket(key) {
+                table[kind.index()][bucket as usize] = clamp(key.clone(), t);
+            }
+        }
+        Self { table, clamped }
+    }
+
+    /// The temperature to divide a `kind` question's logits by when it has `k` options.
+    pub fn temperature(&self, kind: QType, k: usize) -> f32 {
+        self.table[kind.index()][OptionBucket::from_count(k) as usize]
+    }
 }
 
 /// Numerically stable softmax over a slice.
@@ -63,6 +140,7 @@ pub fn round4(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_sharpening_temperature_is_refused() {
@@ -80,6 +158,22 @@ mod tests {
         assert_eq!(temp_bucket(QType::Choice, 7), "choice:6-10");
         assert_eq!(temp_bucket(QType::Choice, 20), "choice:11+");
         assert_eq!(temp_bucket(QType::Score, 3), "score:3-5");
+    }
+
+    #[test]
+    fn a_bucket_overrides_its_type_and_the_rest_fall_back() {
+        let cfg: AgentConfig = serde_json::from_value(json!({
+            "temperature": [1.5, 2.0, 1.0],
+            "temperature_by_options": {"choice:11+": 0.1006, "score:2": 3.0, "bogus:9": 42.0},
+        }))
+        .unwrap();
+        let cal = Calibration::from_config(&cfg);
+        assert_eq!(cal.temperature(QType::Choice, 4), 1.5);
+        assert_eq!(cal.temperature(QType::Choice, 20), TEMP_MIN);
+        assert_eq!(cal.temperature(QType::Score, 2), 3.0);
+        assert_eq!(cal.temperature(QType::Score, 5), 2.0);
+        assert_eq!(cal.temperature(QType::Noul, 2), 1.0);
+        assert_eq!(cal.clamped, vec!["choice:11+=0.1006".to_string()]);
     }
 
     #[test]

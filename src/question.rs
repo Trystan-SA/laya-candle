@@ -24,6 +24,9 @@ pub enum QType {
 }
 
 impl QType {
+    /// Every kind, in [`index`](QType::index) order.
+    pub const ALL: [QType; 3] = [QType::Choice, QType::Score, QType::Noul];
+
     /// Index used by the model's type embedding. Must match the training order.
     pub fn index(self) -> usize {
         match self {
@@ -74,10 +77,7 @@ impl Question {
 
     /// The instruction text as the model sees it: strings pass through, anything else is JSON.
     pub fn instructions_text(&self) -> String {
-        match &self.instructions {
-            Value::String(s) => s.clone(),
-            other => pyjson::dumps(other),
-        }
+        pyjson::render(&self.instructions)
     }
 
     /// The labels an answer can carry, in marker order.
@@ -104,19 +104,19 @@ impl Question {
                 .map(|(k, v)| match v {
                     // Only null and "" mean "no description": 0 and false are real criteria.
                     None => k,
-                    Some(v) => format!("{k}: {}", render_criterion(&v)),
+                    Some(v) => format!("{k}: {}", pyjson::render(&v)),
                 })
                 .collect()),
             QType::Score => Ok(self
                 .score_levels(id)?
                 .iter()
                 .enumerate()
-                .map(|(i, c)| format!("level {i}: {}", render_criterion(c)))
+                .map(|(i, c)| format!("level {i}: {}", pyjson::render(c)))
                 .collect()),
             QType::Noul => {
                 let crit = self.criteria.as_ref().and_then(Value::as_object);
                 let side = |key: &str, fallback: &str| match crit.and_then(|c| c.get(key)) {
-                    Some(v) if !is_blank(v) => format!("{key}: {}", render_criterion(v)),
+                    Some(v) if !is_blank(v) => format!("{key}: {}", pyjson::render(v)),
                     _ => format!("{key}: {fallback}"),
                 };
                 Ok(vec![
@@ -130,13 +130,7 @@ impl Question {
     fn choice_entries(&self, id: &str) -> Result<Vec<(String, Option<Value>)>> {
         match self.criteria.as_ref() {
             // A bare list of labels is shorthand for "no description for any of them".
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|v| match v {
-                    Value::String(s) => Ok((s.clone(), None)),
-                    other => Ok((pyjson::dumps(other), None)),
-                })
-                .collect(),
+            Some(Value::Array(items)) => Ok(items.iter().map(|v| (pyjson::render(v), None)).collect()),
             Some(Value::Object(map)) => Ok(map
                 .iter()
                 .map(|(k, v)| (k.clone(), if is_blank(v) { None } else { Some(v.clone()) }))
@@ -148,7 +142,8 @@ impl Question {
         }
     }
 
-    fn score_levels(&self, id: &str) -> Result<&Vec<Value>> {
+    /// The ordered level descriptions of a `score` question.
+    pub(crate) fn score_levels(&self, id: &str) -> Result<&Vec<Value>> {
         match self.criteria.as_ref() {
             Some(Value::Array(items)) if !items.is_empty() => Ok(items),
             _ => Err(Error::question(
@@ -161,14 +156,6 @@ impl Question {
 
 fn is_blank(v: &Value) -> bool {
     matches!(v, Value::Null) || matches!(v, Value::String(s) if s.is_empty())
-}
-
-/// Render one criterion value: strings pass through, anything structured becomes JSON.
-fn render_criterion(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => pyjson::dumps(other),
-    }
 }
 
 /// An ordered set of questions, answered together in one forward pass.

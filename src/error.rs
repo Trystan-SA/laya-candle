@@ -57,6 +57,12 @@ impl Error {
     }
 }
 
+/// Read and parse a JSON file, naming the file in either failure.
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T> {
+    let raw = std::fs::read_to_string(path).map_err(|e| Error::io(path.display(), e))?;
+    serde_json::from_str(&raw).map_err(|e| Error::json(path.display(), e))
+}
+
 impl From<tokenizers::Error> for Error {
     fn from(e: tokenizers::Error) -> Self {
         Error::Tokenizer(e.to_string())

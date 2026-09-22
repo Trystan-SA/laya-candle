@@ -47,11 +47,12 @@ pub fn dumps(value: &Value) -> String {
     String::from_utf8(buf).expect("serde_json only ever emits UTF-8")
 }
 
-/// Flatten a state into the exact string the model reads.
+/// The exact text a value contributes to the sequence: a string passes through untouched,
+/// anything structured is dumped as JSON.
 ///
-/// A string state passes through untouched; anything structured is dumped as JSON.
-pub fn serialize_state(state: &Value) -> String {
-    match state {
+/// This is how the state, the instructions and every criterion reach the model.
+pub fn render(value: &Value) -> String {
+    match value {
         Value::String(s) => s.clone(),
         other => dumps(other),
     }
@@ -75,8 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn a_string_state_is_not_quoted() {
-        assert_eq!(serialize_state(&json!("plain text")), "plain text");
-        assert_eq!(serialize_state(&json!({"a": 1})), r#"{"a": 1}"#);
+    fn a_string_is_not_quoted() {
+        assert_eq!(render(&json!("plain text")), "plain text");
+        assert_eq!(render(&json!({"a": 1})), r#"{"a": 1}"#);
     }
 }

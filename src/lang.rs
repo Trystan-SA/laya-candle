@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use crate::calibration::round4;
+
 /// Unicode blocks the English (50k English BPE) checkpoint cannot read.
 const SCRIPT_RANGES: &[(&str, &[(u32, u32)])] = &[
     ("greek", &[(0x0370, 0x03FF), (0x1F00, 0x1FFF)]),
@@ -40,13 +42,17 @@ const SCRIPT_RANGES: &[(&str, &[(u32, u32)])] = &[
     ("han", &[(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)]),
 ];
 
-/// Function words. Latin-script languages overlap heavily (`de` / `la` / `le` / `un` / `e` /
-/// `que`), so a margin is required before calling something non-English. Order matters: it
-/// decides ties between languages with equal hit counts.
+/// English function words, the baseline every other Latin-script language has to beat.
+const EN_STOPWORDS: &[&str] = &[
+    "the", "and", "is", "are", "was", "were", "to", "of", "in", "for", "with", "that", "this",
+    "it", "you", "have", "has", "not", "but", "on", "at", "be", "as", "from", "will", "can",
+    "would", "there", "their", "what", "which", "please", "we", "i",
+];
+
+/// Function words of the non-English Latin-script languages we can name. They overlap heavily
+/// (`de` / `la` / `le` / `un` / `e` / `que`), so a margin is required before calling something
+/// non-English. Order matters: it decides ties between languages with equal hit counts.
 const STOPWORDS: &[(&str, &[&str])] = &[
-    ("en", &["the", "and", "is", "are", "was", "were", "to", "of", "in", "for", "with", "that",
-             "this", "it", "you", "have", "has", "not", "but", "on", "at", "be", "as", "from",
-             "will", "can", "would", "there", "their", "what", "which", "please", "we", "i"]),
     ("fr", &["le", "la", "les", "des", "une", "est", "pour", "dans", "que", "qui", "avec", "sur",
              "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce"]),
     ("de", &["der", "die", "das", "und", "ist", "ein", "eine", "den", "dem", "nicht", "mit", "für",
@@ -110,10 +116,6 @@ pub struct Detection {
     pub non_latin_fraction: f32,
 }
 
-fn round4(v: f32) -> f32 {
-    (v * 1e4).round() / 1e4
-}
-
 fn script_of(c: char) -> Option<&'static str> {
     let cp = c as u32;
     if cp < 0x0250 || (0x1E00..=0x1EFF).contains(&cp) {
@@ -138,13 +140,25 @@ fn script_counts(text: &str) -> Vec<(&'static str, usize)> {
     counts
 }
 
-/// The string leaves of a state, in order. Keys are ignored: they are usually English.
-fn text_leaves(state: &Value, depth: usize, out: &mut Vec<String>) {
-    if depth > MAX_DEPTH {
+/// The first maximum, the way Python's `max` picks it; `Iterator::max_by_key` keeps the last.
+fn first_max<T>(items: impl IntoIterator<Item = (T, usize)>) -> Option<(T, usize)> {
+    items.into_iter().reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
+}
+
+/// Append the string leaves of a state, in order and space-separated. Keys are ignored: they
+/// are usually English.
+fn text_leaves(state: &Value, depth: usize, out: &mut String) {
+    // A char is at most four bytes, so past this many the cap in chars is already met.
+    if depth > MAX_DEPTH || out.len() >= 4 * MAX_DETECTION_CHARS {
         return;
     }
     match state {
-        Value::String(s) => out.push(s.clone()),
+        Value::String(s) => {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(s);
+        }
         Value::Object(map) => {
             for v in map.values() {
                 text_leaves(v, depth + 1, out);
@@ -161,38 +175,34 @@ fn text_leaves(state: &Value, depth: usize, out: &mut Vec<String>) {
 
 /// Flatten a state into the text detection reads.
 pub fn state_text(state: &Value) -> String {
-    let mut leaves = Vec::new();
-    text_leaves(state, 0, &mut leaves);
-    leaves.join(" ").chars().take(MAX_DETECTION_CHARS).collect()
+    let mut text = String::new();
+    text_leaves(state, 0, &mut text);
+    if let Some((cut, _)) = text.char_indices().nth(MAX_DETECTION_CHARS) {
+        text.truncate(cut);
+    }
+    text
+}
+
+fn dominant_script(counts: &[(&'static str, usize)]) -> &'static str {
+    first_max(counts.iter().copied()).map_or("unknown", |(name, _)| name)
+}
+
+fn profile_of(counts: &[(&'static str, usize)]) -> BTreeMap<String, f32> {
+    let total: usize = counts.iter().map(|(_, n)| *n).sum();
+    counts
+        .iter()
+        .map(|&(name, n)| (name.to_string(), n as f32 / total as f32))
+        .collect()
 }
 
 /// Dominant script of `text`, or `"unknown"` when it holds no letters.
 pub fn detect_script(text: &str) -> String {
-    let counts = script_counts(text);
-    if counts.is_empty() {
-        return "unknown".to_string();
-    }
-    // Python's `max` keeps the first maximum in insertion order, and so does this.
-    counts
-        .iter()
-        .copied()
-        .reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
-        .map(|(name, _)| name.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+    dominant_script(&script_counts(text)).to_string()
 }
 
 /// Fraction of alphabetic characters belonging to each detected script.
 pub fn script_profile(text: &str) -> BTreeMap<String, f32> {
-    let counts = script_counts(text);
-    let total: usize = counts.iter().map(|(_, n)| *n).sum();
-    if total == 0 {
-        return BTreeMap::new();
-    }
-    counts
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(name, n)| (name.to_string(), n as f32 / total as f32))
-        .collect()
+    profile_of(&script_counts(text))
 }
 
 struct LatinProfile {
@@ -202,26 +212,18 @@ struct LatinProfile {
 }
 
 fn words(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for c in text.chars() {
-        if c.is_alphabetic() {
-            cur.extend(c.to_lowercase());
-        } else if !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
+    text.split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 fn latin_profile(text: &str) -> LatinProfile {
     let ws = words(text);
-    let lowered: Vec<char> = text.to_lowercase().chars().collect();
-    let diac = lowered.iter().filter(|c| NON_EN_DIACRITICS.contains(**c)).count();
-    let diacritic_rate = diac as f32 / std::cmp::max(1, lowered.len()) as f32;
+    let lowered = text.to_lowercase();
+    let n_chars = lowered.chars().count();
+    let diac = lowered.chars().filter(|c| NON_EN_DIACRITICS.contains(*c)).count();
+    let diacritic_rate = diac as f32 / n_chars.max(1) as f32;
     let looks_non_english = diacritic_rate >= NON_EN_DIACRITIC_RATE;
 
     if ws.len() < 4 {
@@ -229,19 +231,14 @@ fn latin_profile(text: &str) -> LatinProfile {
     }
 
     let hits = |list: &[&str]| ws.iter().filter(|w| list.contains(&w.as_str())).count();
-    let en = STOPWORDS.iter().find(|(lg, _)| *lg == "en").map(|(_, l)| hits(l)).unwrap_or(0);
-    let (mut best_lg, best) = STOPWORDS
-        .iter()
-        .filter(|(lg, _)| *lg != "en")
-        .map(|(lg, list)| (Some(*lg), hits(list)))
-        .reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
-        .unwrap_or((None, 0));
+    let en = hits(EN_STOPWORDS);
     // No stopword hit for any non-English language is no evidence for a *particular* one.
     // Naming the winner of a 0-0 tie invented a language, so stay undecided and let the
     // diacritic rate speak.
-    if best == 0 {
-        best_lg = None;
-    }
+    let (best_lg, best) = match first_max(STOPWORDS.iter().map(|(lg, list)| (*lg, hits(list)))) {
+        Some((lg, n)) if n > 0 => (Some(lg), n),
+        _ => (None, 0),
+    };
 
     let language = match best_lg {
         // A non-English language needs a clear margin over English function words.
@@ -260,53 +257,36 @@ fn latin_profile(text: &str) -> LatinProfile {
 /// Full detection result for a state.
 pub fn analyse(state: &Value) -> Detection {
     let text = state_text(state);
-    let profile = script_profile(&text);
-    let script = detect_script(&text);
-    let non_latin = if profile.is_empty() {
+    let counts = script_counts(&text);
+    let script = dominant_script(&counts);
+    let profile = profile_of(&counts);
+    let non_latin_fraction = if profile.is_empty() {
         0.0
     } else {
         round4(1.0 - profile.get("latin").copied().unwrap_or(0.0))
     };
 
-    if script == "unknown" {
-        return Detection {
-            script,
-            script_profile: profile,
-            language: None,
-            is_english: true,
-            language_undecided: true,
-            diacritic_rate: 0.0,
-            non_latin_fraction: 0.0,
-        };
-    }
-    if script != "latin" {
-        return Detection {
-            script,
-            script_profile: profile,
-            language: None,
-            is_english: false,
-            language_undecided: true,
-            diacritic_rate: 0.0,
-            non_latin_fraction: non_latin,
-        };
-    }
+    let latin = (script == "latin").then(|| latin_profile(&text));
+    let language = latin.as_ref().and_then(|l| l.language.clone());
+    // A state with no letters stays on the English checkpoint; another script never does. For
+    // Latin text, undecided is not English: treating it as English sent every Latin-script
+    // language we hold no stopwords for to the checkpoint that cannot read it, silently. When
+    // nothing identifies the language, non-English letters are enough to prefer the
+    // multilingual checkpoint; text with no such letters (including short English) still goes
+    // to the English one.
+    let is_english = match &latin {
+        None => script == "unknown",
+        Some(l) => language.as_deref() == Some("en") || (language.is_none() && !l.looks_non_english),
+    };
 
-    let lat = latin_profile(&text);
-    let undecided = lat.language.is_none();
-    // Undecided is not English. Treating it as English sent every Latin-script language we hold
-    // no stopwords for to the checkpoint that cannot read it, silently. When nothing identifies
-    // the language, non-English letters are enough to prefer the multilingual checkpoint; text
-    // with no such letters (including short English) still goes to the English one.
-    let is_english =
-        lat.language.as_deref() == Some("en") || (undecided && !lat.looks_non_english);
     Detection {
-        script,
+        script: script.to_string(),
         script_profile: profile,
-        language: lat.language,
+        language_undecided: language.is_none(),
+        language,
         is_english,
-        language_undecided: undecided,
-        diacritic_rate: round4(lat.diacritic_rate),
-        non_latin_fraction: non_latin,
+        diacritic_rate: latin.as_ref().map_or(0.0, |l| round4(l.diacritic_rate)),
+        non_latin_fraction,
     }
 }
 
@@ -363,5 +343,11 @@ mod tests {
         let d = analyse(&json!({"thread": [{"body": "मुझसे दो बार शुल्क लिया गया"}]}));
         assert_eq!(d.script, "devanagari");
         assert!(!d.is_english);
+    }
+
+    #[test]
+    fn detection_text_is_capped_in_chars_not_bytes() {
+        let long = "मुझसे ".repeat(2000);
+        assert_eq!(state_text(&json!(long)).chars().count(), MAX_DETECTION_CHARS);
     }
 }

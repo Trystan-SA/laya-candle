@@ -9,10 +9,12 @@
 //! Each `[MASK]` is a *marker*: the hidden state at that position is what the scorer reads, so
 //! one marker per option and the model answers every option of every question in one pass.
 
+use std::borrow::Cow;
+
 use tokenizers::Tokenizer;
 
 use crate::error::{Error, Result};
-use crate::question::Question;
+use crate::question::{QType, Question};
 use crate::tokenizer::SpecialTokens;
 
 /// At most this many tokens of any single option text.
@@ -25,108 +27,147 @@ const MIN_HEAD_TOKENS: usize = 8;
 pub(crate) struct Item {
     pub ids: Vec<u32>,
     pub markers: Vec<usize>,
-    pub qtype: usize,
+    pub qtype: QType,
 }
 
-fn truncate(mut v: Vec<u32>, n: usize) -> Vec<u32> {
-    v.truncate(n);
-    v
-}
-
-fn encode(tok: &Tokenizer, text: &str) -> Result<Vec<u32>> {
-    Ok(tok.encode(text, false)?.get_ids().to_vec())
-}
-
-/// Encode one question against one state.
-///
-/// `state` is the already-flattened state text. `truncate_left` keeps the *end* of a state that
-/// does not fit, which is what you want for a conversation.
-pub(crate) fn build(
-    tok: &Tokenizer,
-    sp: &SpecialTokens,
-    state: &str,
-    id: &str,
-    q: &Question,
+/// Turns questions and states into sequences that fit a checkpoint's budget.
+pub(crate) struct Encoder {
+    tok: Tokenizer,
+    sp: SpecialTokens,
+    /// Total sequence budget, including the question head and the state.
     max_len: usize,
+    /// Token budget for the question head (instructions plus every option).
     head_max_len: usize,
-    truncate_left: bool,
-) -> Result<Item> {
-    let options = q.render_options(id)?;
-    let n_options = options.len();
-    if n_options == 0 {
-        return Err(Error::question(id, "has no options to score"));
-    }
-
-    // Any literal mask token in user text would create a marker the scorer would read as an
-    // option boundary, so it is blanked out everywhere text enters the sequence.
-    let scrub = |s: &str| s.replace(&sp.mask_token, " ");
-
-    let head_text = format!("{} question: {}", q.kind.name(), scrub(&q.instructions_text()));
-    let mut head_ids = encode(tok, &head_text)?;
-
-    let mut opt_ids: Vec<Vec<u32>> = Vec::with_capacity(n_options);
-    for opt in &options {
-        let body = truncate(encode(tok, &format!(" {}", scrub(opt)))?, MAX_OPTION_TOKENS);
-        let mut ids = Vec::with_capacity(body.len() + 1);
-        ids.push(sp.mask_id);
-        ids.extend(body);
-        opt_ids.push(ids);
-    }
-
-    let total: usize = opt_ids.iter().map(Vec::len).sum();
-    let mut opt_budget = head_max_len as i64 - total as i64;
-    if opt_budget < 16 {
-        // The options alone are eating the head budget: share what is left evenly between them
-        // rather than letting the first options starve the last.
-        let per = std::cmp::max(4, (head_max_len as i64 - 16) / n_options as i64) as usize;
-        for o in &mut opt_ids {
-            o.truncate(per);
-        }
-        let total: usize = opt_ids.iter().map(Vec::len).sum();
-        opt_budget = head_max_len as i64 - total as i64;
-    }
-    head_ids.truncate(std::cmp::max(MIN_HEAD_TOKENS as i64, opt_budget) as usize);
-
-    let mut ids = Vec::with_capacity(max_len);
-    ids.push(sp.cls_id);
-    ids.extend_from_slice(&head_ids);
-    ids.push(sp.sep_id);
-
-    let mut markers = Vec::with_capacity(n_options);
-    for o in &opt_ids {
-        markers.push(ids.len());
-        ids.extend_from_slice(o);
-    }
-    ids.push(sp.sep_id);
-
-    let room = max_len.saturating_sub(ids.len() + 1);
-    let state_ids = encode(tok, &scrub(state))?;
-    let kept = if state_ids.len() <= room {
-        state_ids.as_slice()
-    } else if truncate_left {
-        &state_ids[state_ids.len() - room..]
-    } else {
-        &state_ids[..room]
-    };
-    ids.extend_from_slice(kept);
-    ids.push(sp.sep_id);
-    ids.truncate(max_len);
-
-    markers.retain(|&m| m < max_len);
-    if markers.len() != n_options {
-        return Err(Error::question(
-            id,
-            format!(
-                "its {n_options} options do not fit in head_max_len={head_max_len}; \
-                 shorten the option descriptions or use a checkpoint with a larger head budget"
-            ),
-        ));
-    }
-
-    Ok(Item { ids, markers, qtype: q.kind.index() })
 }
 
-/// Pad a batch of encoded questions into rectangular tensors' worth of data.
+impl Encoder {
+    pub(crate) fn new(tok: Tokenizer, sp: SpecialTokens, max_len: usize, head_max_len: usize) -> Self {
+        Self { tok, sp, max_len, head_max_len }
+    }
+
+    /// Any literal mask token in user text would create a marker the scorer would read as an
+    /// option boundary, so it is blanked out everywhere text enters the sequence.
+    fn scrub<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        if s.contains(&self.sp.mask_token) {
+            Cow::Owned(s.replace(&self.sp.mask_token, " "))
+        } else {
+            Cow::Borrowed(s)
+        }
+    }
+
+    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(self.tok.encode(text, false)?.get_ids().to_vec())
+    }
+
+    /// Encode the flattened state once; every question in a batch shares it.
+    pub(crate) fn encode_state(&self, state: &str) -> Result<Vec<u32>> {
+        self.encode(&self.scrub(state))
+    }
+
+    /// Encode one question over an already-encoded state.
+    ///
+    /// A state that does not fit is cut at the end.
+    pub(crate) fn build(&self, state_ids: &[u32], id: &str, q: &Question) -> Result<Item> {
+        let options = q.render_options(id)?;
+        let n_options = options.len();
+        if n_options == 0 {
+            return Err(Error::question(id, "has no options to score"));
+        }
+
+        let head_text = format!("{} question: {}", q.kind.name(), self.scrub(&q.instructions_text()));
+        let mut head_ids = self.encode(&head_text)?;
+
+        let mut opt_ids: Vec<Vec<u32>> = Vec::with_capacity(n_options);
+        for opt in &options {
+            let mut body = self.encode(&format!(" {}", self.scrub(opt)))?;
+            body.truncate(MAX_OPTION_TOKENS);
+            let mut ids = Vec::with_capacity(body.len() + 1);
+            ids.push(self.sp.mask_id);
+            ids.extend(body);
+            opt_ids.push(ids);
+        }
+
+        let head_max_len = self.head_max_len;
+        let total: usize = opt_ids.iter().map(Vec::len).sum();
+        let mut opt_budget = head_max_len.saturating_sub(total);
+        if opt_budget < 16 {
+            // The options alone are eating the head budget: share what is left evenly between them
+            // rather than letting the first options starve the last.
+            let per = (head_max_len.saturating_sub(16) / n_options).max(4);
+            for o in &mut opt_ids {
+                o.truncate(per);
+            }
+            let total: usize = opt_ids.iter().map(Vec::len).sum();
+            opt_budget = head_max_len.saturating_sub(total);
+        }
+        head_ids.truncate(opt_budget.max(MIN_HEAD_TOKENS));
+
+        let mut ids = Vec::with_capacity(self.max_len);
+        ids.push(self.sp.cls_id);
+        ids.extend_from_slice(&head_ids);
+        ids.push(self.sp.sep_id);
+
+        let mut markers = Vec::with_capacity(n_options);
+        for o in &opt_ids {
+            markers.push(ids.len());
+            ids.extend_from_slice(o);
+        }
+        ids.push(self.sp.sep_id);
+
+        let room = self.max_len.saturating_sub(ids.len() + 1);
+        ids.extend_from_slice(&state_ids[..state_ids.len().min(room)]);
+        ids.push(self.sp.sep_id);
+        ids.truncate(self.max_len);
+
+        markers.retain(|&m| m < self.max_len);
+        if markers.len() != n_options {
+            return Err(Error::question(
+                id,
+                format!(
+                    "its {n_options} options do not fit in head_max_len={head_max_len}; \
+                     shorten the option descriptions or use a checkpoint with a larger head budget"
+                ),
+            ));
+        }
+
+        Ok(Item { ids, markers, qtype: q.kind })
+    }
+
+    /// Pad a batch of encoded questions into rectangular tensors' worth of data.
+    pub(crate) fn collate(&self, items: &[Item]) -> Batch {
+        let batch = items.len();
+        let seq_len = items.iter().map(|i| i.ids.len()).max().unwrap_or(0);
+        // A question with a single option still needs two slots: the action head reads a top-1
+        // and a top-2 probability, and the padded slot supplies the missing one as a hard zero.
+        let k_max = items.iter().map(|i| i.markers.len()).max().unwrap_or(0).max(2);
+
+        let mut input_ids = vec![self.sp.pad_id; batch * seq_len];
+        let mut attention_mask = vec![0f32; batch * seq_len];
+        let mut marker_pos = vec![0u32; batch * k_max];
+        let mut marker_mask = vec![0u8; batch * k_max];
+        let mut qtype = Vec::with_capacity(batch);
+        let mut n_tokens = 0;
+
+        for (r, it) in items.iter().enumerate() {
+            let row = r * seq_len;
+            for (c, &t) in it.ids.iter().enumerate() {
+                input_ids[row + c] = t;
+                attention_mask[row + c] = 1.0;
+            }
+            n_tokens += it.ids.len();
+            let mrow = r * k_max;
+            for (c, &m) in it.markers.iter().enumerate() {
+                marker_pos[mrow + c] = m as u32;
+                marker_mask[mrow + c] = 1;
+            }
+            qtype.push(it.qtype.index() as u32);
+        }
+
+        Batch { input_ids, attention_mask, marker_pos, marker_mask, qtype, batch, seq_len, k_max, n_tokens }
+    }
+}
+
+/// A batch of encoded questions, padded rectangular.
 pub(crate) struct Batch {
     pub input_ids: Vec<u32>,
     pub attention_mask: Vec<f32>,
@@ -137,36 +178,4 @@ pub(crate) struct Batch {
     pub seq_len: usize,
     pub k_max: usize,
     pub n_tokens: usize,
-}
-
-pub(crate) fn collate(items: &[Item], pad_id: u32) -> Batch {
-    let batch = items.len();
-    let seq_len = items.iter().map(|i| i.ids.len()).max().unwrap_or(0);
-    // A question with a single option still needs two slots: the action head reads a top-1 and a
-    // top-2 probability, and the padded slot supplies the missing one as a hard zero.
-    let k_max = items.iter().map(|i| i.markers.len()).max().unwrap_or(0).max(2);
-
-    let mut input_ids = vec![pad_id; batch * seq_len];
-    let mut attention_mask = vec![0f32; batch * seq_len];
-    let mut marker_pos = vec![0u32; batch * k_max];
-    let mut marker_mask = vec![0u8; batch * k_max];
-    let mut qtype = Vec::with_capacity(batch);
-    let mut n_tokens = 0;
-
-    for (r, it) in items.iter().enumerate() {
-        let row = r * seq_len;
-        for (c, &t) in it.ids.iter().enumerate() {
-            input_ids[row + c] = t;
-            attention_mask[row + c] = 1.0;
-        }
-        n_tokens += it.ids.len();
-        let mrow = r * k_max;
-        for (c, &m) in it.markers.iter().enumerate() {
-            marker_pos[mrow + c] = m as u32;
-            marker_mask[mrow + c] = 1;
-        }
-        qtype.push(it.qtype as u32);
-    }
-
-    Batch { input_ids, attention_mask, marker_pos, marker_mask, qtype, batch, seq_len, k_max, n_tokens }
 }

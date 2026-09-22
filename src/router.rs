@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use candle_core::Device;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent::Agent;
 use crate::answer::Prediction;
+use crate::checkpoint::hub_label;
 use crate::error::{Error, Result};
 use crate::lang::{Detection, analyse};
 use crate::question::Questions;
@@ -83,25 +85,21 @@ impl ModelSpec {
     /// How this spec reads in a routing decision.
     pub fn label(&self) -> String {
         match self {
-            ModelSpec::Hub { repo, subfolder: Some(s) } => format!("{repo}/{s}"),
-            ModelSpec::Hub { repo, subfolder: None } => repo.clone(),
+            ModelSpec::Hub { repo, subfolder } => hub_label(repo, subfolder.as_deref()),
             ModelSpec::Dir(p) => p.display().to_string(),
         }
     }
 }
 
+/// The bundle repository: English at the root, every other checkpoint in a subfolder of its name.
 fn default_models() -> HashMap<ModelName, ModelSpec> {
-    HashMap::from([
-        (ModelName::English, ModelSpec::Hub { repo: BUNDLE_REPO.into(), subfolder: None }),
-        (
-            ModelName::Multilingual,
-            ModelSpec::Hub { repo: BUNDLE_REPO.into(), subfolder: Some("multilingual".into()) },
-        ),
-        (
-            ModelName::TypedDecisions,
-            ModelSpec::Hub { repo: BUNDLE_REPO.into(), subfolder: Some("typed-decisions".into()) },
-        ),
-    ])
+    ModelName::ALL
+        .into_iter()
+        .map(|name| {
+            let subfolder = (name != ModelName::English).then(|| name.as_str().to_string());
+            (name, ModelSpec::Hub { repo: BUNDLE_REPO.into(), subfolder })
+        })
+        .collect()
 }
 
 /// Question-id signatures of the four typed-decisions workflows.
@@ -163,11 +161,27 @@ impl RouteOptions {
     }
 }
 
-#[derive(Default)]
+/// The resident checkpoints, least recently used first, never more than `max`.
 struct Loaded {
-    agents: HashMap<ModelName, Arc<Agent>>,
-    /// Least recently used first.
-    order: Vec<ModelName>,
+    agents: IndexMap<ModelName, Arc<Agent>>,
+    max: usize,
+}
+
+impl Loaded {
+    /// The resident agent for `name`, marked as just used.
+    fn touch(&mut self, name: ModelName) -> Option<Arc<Agent>> {
+        let agent = self.agents.shift_remove(&name)?;
+        self.agents.insert(name, Arc::clone(&agent));
+        Some(agent)
+    }
+
+    /// Make `agent` resident, evicting the least recently used beyond the cap.
+    fn insert(&mut self, name: ModelName, agent: Arc<Agent>) {
+        self.agents.insert(name, agent);
+        while self.agents.len() > self.max {
+            self.agents.shift_remove_index(0);
+        }
+    }
 }
 
 /// Lazily loads checkpoints and sends each request to the right one.
@@ -178,7 +192,6 @@ struct Loaded {
 pub struct Router {
     models: HashMap<ModelName, ModelSpec>,
     device: Device,
-    max_loaded: Mutex<usize>,
     default: ModelName,
     auto_task_detection: bool,
     loaded: Mutex<Loaded>,
@@ -251,18 +264,14 @@ impl RouterBuilder {
     }
 
     pub fn build(self) -> Result<Router> {
-        let max_loaded = self.max_loaded.max(self.preload.len()).max(1);
         let router = Router {
             models: self.models,
             device: self.device,
-            max_loaded: Mutex::new(max_loaded),
             default: self.default,
             auto_task_detection: self.auto_task_detection,
-            loaded: Mutex::new(Loaded::default()),
+            loaded: Mutex::new(Loaded { agents: IndexMap::new(), max: self.max_loaded }),
         };
-        for name in self.preload {
-            router.load(name)?;
-        }
+        router.preload(self.preload)?;
         Ok(router)
     }
 }
@@ -279,7 +288,7 @@ impl Router {
 
     /// The checkpoints currently resident, least recently used first.
     pub fn loaded(&self) -> Vec<ModelName> {
-        self.loaded.lock().unwrap().order.clone()
+        self.loaded.lock().unwrap().agents.keys().copied().collect()
     }
 
     /// Build a checkpoint now, reusing it if it is already resident.
@@ -287,9 +296,7 @@ impl Router {
     /// Concurrent callers share one `Agent` rather than building duplicates.
     pub fn load(&self, name: ModelName) -> Result<Arc<Agent>> {
         let mut loaded = self.loaded.lock().unwrap();
-        if let Some(agent) = loaded.agents.get(&name) {
-            let agent = Arc::clone(agent);
-            touch(&mut loaded, name);
+        if let Some(agent) = loaded.touch(name) {
             return Ok(agent);
         }
 
@@ -298,10 +305,7 @@ impl Router {
             .get(&name)
             .ok_or_else(|| Error::UnknownModel(format!("{name} is not configured on this router")))?;
         let agent = Arc::new(build(spec, &self.device)?);
-        loaded.agents.insert(name, Arc::clone(&agent));
-        loaded.order.push(name);
-        let max = *self.max_loaded.lock().unwrap();
-        evict(&mut loaded, max);
+        loaded.insert(name, Arc::clone(&agent));
         Ok(agent)
     }
 
@@ -309,8 +313,8 @@ impl Router {
     pub fn preload(&self, names: impl IntoIterator<Item = ModelName>) -> Result<()> {
         let names: Vec<_> = names.into_iter().collect();
         {
-            let mut max = self.max_loaded.lock().unwrap();
-            *max = (*max).max(names.len());
+            let mut loaded = self.loaded.lock().unwrap();
+            loaded.max = loaded.max.max(names.len());
         }
         for name in names {
             self.load(name)?;
@@ -322,13 +326,9 @@ impl Router {
     pub fn unload(&self, name: Option<ModelName>) {
         let mut loaded = self.loaded.lock().unwrap();
         match name {
-            None => {
-                loaded.agents.clear();
-                loaded.order.clear();
-            }
+            None => loaded.agents.clear(),
             Some(n) => {
-                loaded.agents.remove(&n);
-                loaded.order.retain(|k| *k != n);
+                loaded.agents.shift_remove(&n);
             }
         }
     }
@@ -356,12 +356,7 @@ impl Router {
             return Ok(decide(m, format!("explicit model={name:?}"), None, None));
         }
         if let Some(task) = &opts.task {
-            let normalised = task.to_lowercase().replace('-', "_");
-            let m = if normalised == "typed_decisions" {
-                ModelName::TypedDecisions
-            } else {
-                ModelName::parse(task)?
-            };
+            let m = ModelName::parse(task)?;
             return Ok(decide(m, format!("explicit task={task:?}"), None, None));
         }
 
@@ -434,18 +429,6 @@ impl Router {
         let mut out = agent.predict_value(state, questions)?;
         out.routing = Some(decision);
         Ok(out)
-    }
-}
-
-fn touch(loaded: &mut Loaded, name: ModelName) {
-    loaded.order.retain(|k| *k != name);
-    loaded.order.push(name);
-}
-
-fn evict(loaded: &mut Loaded, max_loaded: usize) {
-    while loaded.order.len() > max_loaded {
-        let victim = loaded.order.remove(0);
-        loaded.agents.remove(&victim);
     }
 }
 

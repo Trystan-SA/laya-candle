@@ -7,8 +7,8 @@ use candle_transformers::models::modernbert;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::calibration::clamp_temperature;
-use crate::error::{Error, Result};
+use crate::calibration::Calibration;
+use crate::error::{Error, Result, read_json};
 
 /// The decision-model side of a checkpoint, as stored in `rl_agent_config.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,8 +33,6 @@ pub struct AgentConfig {
     /// Finer calibration, keyed by `"<type>:<option-count bucket>"`.
     #[serde(default)]
     pub temperature_by_options: HashMap<String, f32>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
 }
 
 fn default_head_layers() -> usize {
@@ -52,8 +50,7 @@ fn default_temperature() -> Vec<f32> {
 
 impl AgentConfig {
     pub fn from_file(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path).map_err(|e| Error::io(path.display(), e))?;
-        serde_json::from_str(&raw).map_err(|e| Error::json(path.display(), e))
+        read_json(path)
     }
 
     /// Width of the auxiliary action head.
@@ -62,35 +59,8 @@ impl AgentConfig {
     }
 
     /// The temperatures actually applied, clamped into a range that cannot fake confidence.
-    ///
-    /// Returns the clamped per-type values, the clamped per-bucket values, and a description of
-    /// every temperature that had to be clamped so the caller can say so out loud.
-    pub fn calibration(&self) -> (Vec<f32>, HashMap<String, f32>, Vec<String>) {
-        let mut rejected = Vec::new();
-        let by_options: HashMap<String, f32> = self
-            .temperature_by_options
-            .iter()
-            .map(|(k, v)| {
-                let c = clamp_temperature(*v);
-                if c != *v {
-                    rejected.push(format!("{k}={v:.4}"));
-                }
-                (k.clone(), c)
-            })
-            .collect();
-        let per_type: Vec<f32> = self
-            .temperature
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let c = clamp_temperature(*t);
-                if c != *t {
-                    rejected.push(format!("temperature[{i}]={t:.4}"));
-                }
-                c
-            })
-            .collect();
-        (per_type, by_options, rejected)
+    pub fn calibration(&self) -> Calibration {
+        Calibration::from_config(self)
     }
 }
 
@@ -99,8 +69,7 @@ impl AgentConfig {
 /// Transformers 5 moved the RoPE bases into a nested `rope_parameters` block; both that shape
 /// and the older flat `global_rope_theta` / `local_rope_theta` are accepted.
 pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
-    let raw = std::fs::read_to_string(path).map_err(|e| Error::io(path.display(), e))?;
-    let v: Value = serde_json::from_str(&raw).map_err(|e| Error::json(path.display(), e))?;
+    let v: Value = read_json(path)?;
 
     let model_type = v.get("model_type").and_then(Value::as_str).unwrap_or("");
     if model_type != "modernbert" {

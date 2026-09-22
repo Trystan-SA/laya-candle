@@ -1,0 +1,5 @@
+{
+  "from": "user@acme.com",
+  "subject": "Duplicate charge on invoice #4411",
+  "body": "Hi, we were billed twice for March. Please refund the duplicate today or we will cancel our plan."
+}

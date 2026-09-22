@@ -1,0 +1,14 @@
+laya-rs
+Copyright 2026 the laya-rs authors
+
+This product is a Rust port of Laya (https://github.com/NandhaKishorM/laya),
+Copyright the Laya authors, licensed under the Apache License, Version 2.0.
+
+The sequence format, decision head, calibration and routing logic are ported
+from that project. The model checkpoints it loads (convaiinnovations/laya on
+the Hugging Face Hub) are published by the same authors under the same licence
+and are not redistributed here.
+
+The ModernBERT backbone implementation comes from candle-transformers
+(https://github.com/huggingface/candle), licensed under the Apache License,
+Version 2.0 / MIT.

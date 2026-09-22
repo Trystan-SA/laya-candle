@@ -1,0 +1,93 @@
+[package]
+name = "laya-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Non-autoregressive typed-decision engine (choice / score / noul) with calibrated probabilities — a pure-Rust port of laya, runnable in any project."
+repository = "https://github.com/somanyways/laya-rs"
+license = "Apache-2.0"
+keywords = ["nlp", "classification", "modernbert", "candle", "inference"]
+categories = ["science", "text-processing"]
+readme = "README.md"
+exclude = ["/.github", "/assets"]
+
+[lib]
+name = "laya"
+path = "src/lib.rs"
+
+[[bin]]
+name = "laya"
+path = "src/bin/laya.rs"
+required-features = ["cli"]
+
+# Every example fetches checkpoints from the Hub.
+[[example]]
+name = "quickstart"
+required-features = ["hub"]
+
+[[example]]
+name = "support_triage"
+required-features = ["hub"]
+
+[[example]]
+name = "primitives"
+required-features = ["hub"]
+
+[[example]]
+name = "guardrails"
+required-features = ["hub"]
+
+[[example]]
+name = "multilingual"
+required-features = ["hub"]
+
+[[example]]
+name = "questions_from_json"
+required-features = ["hub"]
+
+# Benchmarks: they measure the model rather than show how to use it.
+[[bench]]
+name = "latency"
+harness = false
+required-features = ["hub"]
+
+[[bench]]
+name = "reliability"
+harness = false
+required-features = ["hub"]
+
+[[test]]
+name = "checkpoint"
+required-features = ["hub"]
+
+[dependencies]
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+indexmap = { version = "2.14.2", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+thiserror = "2.0.20"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+
+anyhow = { version = "1.0.104", optional = true }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"], optional = true }
+
+[features]
+default = ["hub", "cli"]
+# Download checkpoints straight from the Hugging Face Hub.
+hub = ["dep:hf-hub"]
+# The `laya` command-line binary.
+cli = ["dep:clap", "dep:anyhow", "hub"]
+
+# Hardware acceleration, forwarded to candle.
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cudnn = ["cuda", "candle-core/cudnn"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"

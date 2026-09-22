@@ -1,27 +1,22 @@
 # laya-rs
 
-**Typed decisions in one forward pass — in Rust, with no Python and no server.**
+**Typed decisions in one forward pass. Pure Rust, no Python, no server.**
 
-`laya-rs` answers *typed questions* about any state (a string, an email, a ticket, a JSON
-document) using a bidirectional encoder and a decision head. Nothing is generated, so there is
-nothing to parse and nothing to hallucinate: every answer is one of three primitives and comes
-back with a probability distribution and a calibrated confidence.
+Ask typed questions about any state (string, email, ticket, JSON) and get back a label, a score
+or a probability, each with a calibrated confidence. Nothing is generated, so nothing to parse and
+nothing to hallucinate.
 
-It is a pure-Rust port of [Laya](https://github.com/NandhaKishorM/laya) — the open-source answer
-to TypeSafe's Jev — and it loads Laya's published checkpoints directly from the Hugging Face Hub.
-No PyTorch, no ONNX Runtime, no sidecar process: add the crate and call it.
+Pure-Rust port of [Laya](https://github.com/NandhaKishorM/laya). Loads Laya's checkpoints
+directly from the Hugging Face Hub via [candle](https://github.com/huggingface/candle).
 
 | primitive | you ask | you get |
 |---|---|---|
-| `choice` | pick one label from a named set | the label, plus a probability per option |
-| `score`  | rate the state against ordered levels | the expected level, plus a probability per level |
-| `noul`   | a boolean question | the probability the statement holds |
+| `choice` | pick one label from a set | the label + a probability per option |
+| `score`  | rate against ordered levels | the expected level + a probability per level |
+| `noul`   | a yes/no question | the probability it holds |
 
-A question set is answered in a **single batched forward pass, with no decoding**: each option
-becomes a `[MASK]` marker and the answer is read off that marker's hidden state. Cost is set by
-how long the input is, not by how much an autoregressive model would have had to write.
-
----
+All questions are answered in a single batched forward pass. Cost scales with input length, not
+output length.
 
 ## Install
 
@@ -31,16 +26,13 @@ laya-rs = "0.1"
 serde_json = "1"
 ```
 
-Rust 1.85+. A C compiler is needed the first time: `candle-core` pulls in `onig`, which builds a
-small C library.
+Rust 1.85+. A C compiler is needed once (`candle-core` pulls in `onig`).
 
-Library-only, without the CLI:
+Library only, no CLI:
 
 ```toml
 laya-rs = { version = "0.1", default-features = false, features = ["hub"] }
 ```
-
----
 
 ## Quickstart
 
@@ -68,179 +60,24 @@ out.get("department").unwrap().as_choice();     // Some("billing")
 out.get("department").unwrap().confidence();    // 0.86
 out.get("urgency").unwrap().as_score();         // Some(1.44)
 out.get("churn_risk").unwrap().as_noul();       // Some(0.825)
-out.routing.unwrap().reason;                    // "English Latin text"
 ```
 
-Questions also load from the same JSON schema the Python package uses, so an existing question
-file works unchanged:
+Other ways to build:
 
 ```rust
+// Questions from the same JSON schema as the Python package
 let questions = laya::Questions::from_json(&std::fs::read_to_string("questions.json")?)?;
-```
 
-One checkpoint, no routing:
-
-```rust
+// One checkpoint, no routing
 let agent = laya::Agent::from_hub("convaiinnovations/laya", Some("multilingual"))?;
-let out = agent.predict(json!({"message": "Ich wurde zweimal belastet"}), &laya::presets::triage())?;
-```
 
-Or from a directory you already have:
-
-```rust
+// From a local directory
 let agent = laya::Agent::from_dir("checkpoints/laya")?;
 ```
 
-An `Agent` is immutable once built and `predict` takes `&self`, so share one behind an `Arc`
-across threads.
+`Agent` is immutable and `predict` takes `&self`: share one behind an `Arc`.
 
----
-
-## Command line
-
-```console
-$ cargo install laya-rs
-
-$ laya predict -s @examples/data/email.json -q triage
-routed to english — English Latin text
-
-intent            choice  refund                        confidence 0.99
-is_urgent         noul    0.222                         confidence 0.78
-frustration       score   1.72 / 3                      confidence 0.32
-refund_requested  noul    0.891                         confidence 0.89
-churn_risk        noul    0.360                         confidence 0.64
-
-379 input tokens, 0 generated
-```
-
-- `laya predict -s <text|@file|-> -q <preset|@file|-> [--model NAME] [--lang xx] [--checkpoint DIR] [--json]`
-- `laya route -s <state>` — show the routing decision without downloading or running anything
-- `laya presets [name]` — list the built-in question sets, or print one as JSON
-
-Built-in presets: `triage`, `email`, `guard`, `moderation`, `router`.
-
----
-
-## Examples
-
-Six runnable programs in `examples/`, each printing how long it took and what it cost in memory.
-
-```console
-cargo run --release --example quickstart
-```
-
-| example | what it shows |
-|---|---|
-| `quickstart` | load a checkpoint, ask three questions, read the answers |
-| `support_triage` | a full support desk: route each ticket to a team, set a priority, send the unsure ones to a human |
-| `primitives` | `choice` / `score` / `noul` side by side, with the full distribution behind each answer |
-| `guardrails` | screen prompts in front of an LLM: allow, review or block |
-| `multilingual` | let `Router` pick the checkpoint, and override it when you already know the language |
-| `questions_from_json` | questions as configuration, in the same JSON schema the Python package and the CLI use |
-
-Every one ends with a line like:
-
-```text
-  [ 2.39 s]  checkpoint ready   (rss 1.8 GiB)
-  [ 889 ms]  answered 3 questions   (rss 1.8 GiB)
-
-  total 3.28 s wall, rss 1.8 GiB, peak 2.4 GiB
-```
-
-Memory is read from `/proc/self/status`, so the numbers appear on Linux and are quietly skipped
-elsewhere.
-
----
-
-## Benchmarks
-
-`benches/` measures the model rather than showing how to use it.
-
-```console
-cargo bench --bench latency        # what it costs
-cargo bench --bench reliability    # whether it decides anything
-```
-
-`latency` reports checkpoint load time, resident and peak memory, and the cost of asking more
-questions in one call. On 24 CPU cores, f32, no BLAS feature enabled:
-
-| | load | resident | 1 question | 15 questions |
-|---|---|---|---|---|
-| `english` (421M) | 2.1 s | 1.8 GiB | 1209 ms | 12.0 s (801 ms/q) |
-| `multilingual` (322M) | 2.7 s | 1.3 GiB | 606 ms | 7.3 s (486 ms/q) |
-
-`reliability` measures separation — the thing a broken forward pass loses first, since it still
-returns well-formed probabilities either way. It exits non-zero if a check fails:
-
-```text
-question            complaint     praise        gap
-refund_requested        0.906      0.016      0.890
-churn_risk              0.692      0.009      0.683
-urgency                 1.491      0.477      1.014
-
-routed  8/8 correct, mean confidence 0.81
-english 7/8 correct, mean confidence 0.56
-```
-
-It also reports a preset question that does **not** separate: `harm_severity` scores attacks and
-benign prompts 0.105 apart, so no threshold on it is a guardrail. The benchmark says so out loud
-rather than quietly passing — measure a question on your own traffic before it gates anything.
-
----
-
-## Checkpoints
-
-| name | encoder | params | context | use it for |
-|---|---|---|---|---|
-| `english` | ModernBERT-large | 421M | 512 | English |
-| `multilingual` | mmBERT-base | 322M | 1024 | 100+ languages, about 2x faster |
-| `typed-decisions` | ModernBERT-large | 421M | 1024 | the four typed-decisions workflows |
-
-Weights come from [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya) and
-are cached by `hf-hub` on first use. Only the requested subfolder is downloaded.
-
-A checkpoint directory is five files:
-
-```
-rl_agent_config.json     head shape, sequence budget, calibration temperatures
-model.safetensors        backbone + decision head
-encoder/config.json      the ModernBERT backbone's shape
-tokenizer/tokenizer.json
-tokenizer/tokenizer_config.json
-```
-
-Anything with that layout loads, so a checkpoint you fine-tune yourself works with no changes
-here.
-
----
-
-## Why route
-
-The English checkpoint does not gently degrade off English — it collapses. On 20-option intent
-classification it scores 0.100 on Hindi and 0.103 on Korean against 0.050 for random guessing,
-**and reports high confidence while doing so**. Because it stays confident while being wrong,
-confidence gating cannot save you. Script detection can, and it costs microseconds of pure Rust
-before the forward pass:
-
-```rust
-laya::detect_language(&json!("Der Kunde wurde zweimal belastet")).is_english;  // false
-router.route(&state, &questions, &Default::default())?.reason;
-// "Latin script but language looks like \"de\", not English"
-```
-
-Detection is exact for script and best-effort for the language of Latin text. Pass
-`RouteOptions::lang("de")` or `RouteOptions::model("multilingual")` when you already know.
-
-A cold checkpoint build costs seconds while detection costs microseconds, so a server that sees
-mixed languages should `preload` — otherwise the default residency of one model rebuilds on
-every language switch.
-
----
-
-## Confidence, and where it stops being trustworthy
-
-The probabilities are trained against strictly proper scoring rules, so gating on them is
-meaningful:
+Gate on confidence:
 
 ```rust
 for id in out.below_confidence(0.85) {
@@ -248,27 +85,126 @@ for id in out.below_confidence(0.85) {
 }
 ```
 
-Two caveats this crate makes explicit rather than silently absorbing:
+## Where Rust matters
 
-- **Confidence is only valid inside a checkpoint's competence.** A model answering a script it
-  cannot read is confidently wrong, and no threshold catches that. Route first.
-- **A shipped temperature below 1 sharpens rather than softens.** The English checkpoint's
-  `choice:11+` bucket is fitted at 0.1006, which multiplies the logits roughly tenfold: a 0.24
-  top probability would be published as 0.99. Temperatures are clamped to `[0.5, 5.0]`, and any
-  clamped bucket is reported at load and listed by `Agent::clamped_temperatures()`. Treat
-  confidence from those buckets as uncalibrated.
+The decision model is the same one the Python package runs. What changes with a native crate is
+where it can go and what it can sit inside of:
 
----
+- **A request-path middleware.** `predict` takes `&self`, so one checkpoint behind an `Arc`
+  serves every worker of an axum, actix or tonic service. Screen prompts, route tickets or gate a
+  webhook inside the process that received it: no HTTP hop to a sidecar, no queue.
+
+  ```rust
+  let agent = Arc::new(Agent::from_hub("convaiinnovations/laya", Some("english"))?);
+  let guard = presets::guard();
+
+  // in each handler:
+  let out = agent.predict(json!({"prompt": body}), &guard)?;
+  if out.get("prompt_injection").and_then(|a| a.as_noul()).unwrap_or(0.0) > 0.9 {
+      return Err(StatusCode::FORBIDDEN);
+  }
+  ```
+
+- **A single binary at the edge.** No interpreter, no virtualenv, no ONNX Runtime to ship. The
+  crate, a weights directory and `Agent::from_dir` run on a box with no network, a kiosk, or a
+  container whose image is the binary plus five files.
+
+- **Text that already flows through Rust.** A proxy, an API gateway, a Kafka consumer, a Discord
+  or Slack bot, a log shipper: a typed decision can be added where the text is, without
+  introducing a second language to the deployment.
+
+- **Multilingual traffic without a model registry.** `Router` detects the script and language in
+  microseconds of pure Rust before touching any weights, then runs the checkpoint that can read
+  the text. One code path handles 100+ languages.
+
+- **Batch jobs and shell pipelines.** The `laya` CLI reads questions as JSON and states from
+  stdin, so a cron job or a `find | xargs laya predict` labels a corpus with no code at all.
+
+- **Confidence you can branch on.** Every answer is a distribution, not a string. The gating
+  logic (escalate, retry, hand to a human) is ordinary Rust over ordinary numbers rather than a
+  regex over generated prose.
+
+## CLI
+
+```console
+$ cargo install laya-rs
+
+$ laya predict -s @examples/data/email.json -q triage
+routed to english — English Latin text
+
+intent            choice  refund      confidence 0.99
+is_urgent         noul    0.222       confidence 0.78
+frustration       score   1.72 / 3    confidence 0.32
+refund_requested  noul    0.891       confidence 0.89
+churn_risk        noul    0.360       confidence 0.64
+```
+
+- `laya predict -s <text|@file|-> -q <preset|@file|-> [--model NAME] [--lang xx] [--checkpoint DIR] [--json]`
+- `laya route -s <state>`: show the routing decision without running the model
+- `laya presets [name]`: list built-in question sets (`triage`, `email`, `guard`, `moderation`, `router`)
+
+## Examples and benchmarks
+
+```console
+cargo run --release --example quickstart
+cargo bench --bench latency        # load time, memory, cost per question
+cargo bench --bench reliability    # checks that opposite states actually separate
+```
+
+| example | shows |
+|---|---|
+| `quickstart` | load, ask three questions, read the answers |
+| `support_triage` | route tickets, set priority, escalate the unsure ones |
+| `primitives` | `choice` / `score` / `noul` with full distributions |
+| `guardrails` | allow / review / block prompts in front of an LLM |
+| `multilingual` | let `Router` pick the checkpoint, or override it |
+| `questions_from_json` | questions as JSON configuration |
+
+## Checkpoints
+
+| name | encoder | params | context | use for |
+|---|---|---|---|---|
+| `english` | ModernBERT-large | 421M | 512 | English |
+| `multilingual` | mmBERT-base | 322M | 1024 | 100+ languages, ~2x faster |
+| `typed-decisions` | ModernBERT-large | 421M | 1024 | the typed-decisions workflows |
+
+Weights come from [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya),
+cached by `hf-hub` on first use. Any directory with the same five-file layout loads, including
+your own fine-tunes.
+
+## Routing
+
+The English checkpoint collapses to near-random on non-Latin scripts **while staying confident**,
+so confidence gating cannot catch it. `Router` detects script and language in microseconds before
+the forward pass and picks the right checkpoint.
+
+```rust
+laya::detect_language(&json!("Der Kunde wurde zweimal belastet")).is_english;  // false
+```
+
+Pass `RouteOptions::lang("de")` or `RouteOptions::model("multilingual")` when you already know.
+Call `preload` on servers seeing mixed languages, or the router rebuilds a checkpoint on every
+language switch.
+
+## Confidence caveats
+
+- **Only valid inside a checkpoint's competence.** Route first.
+- **Shipped temperatures below 1 sharpen instead of soften.** They are clamped to `[0.5, 5.0]`;
+  clamped buckets are reported at load and listed by `Agent::clamped_temperatures()`. Treat their
+  confidence as uncalibrated.
+- **Measure before you gate.** The `reliability` bench flags `harm_severity` in the `guard` preset
+  as not separating attacks from benign prompts.
 
 ## Performance
 
-Everything runs in f32 through [candle](https://github.com/huggingface/candle). candle's
-ModernBERT builds its attention masks in f32 unconditionally, so a half-precision backbone would
-fail on the first broadcast; f32 is also what the reference implementation falls back to off
-CUDA.
+Everything runs in f32 on the CPU by default. On 24 cores, no BLAS:
 
-That makes a plain CPU build slow — see the `latency` table above. Enable the feature that
-matches your machine before drawing any conclusion about speed:
+| | load | resident | 1 question | 15 questions |
+|---|---|---|---|---|
+| `english` | 2.1 s | 1.8 GiB | 1209 ms | 12.0 s (801 ms/q) |
+| `multilingual` | 2.7 s | 1.3 GiB | 606 ms | 7.3 s (486 ms/q) |
+
+Enable the feature that matches your hardware before judging speed:
 
 ```toml
 laya-rs = { version = "0.1", features = ["mkl"] }        # Intel CPU
@@ -277,57 +213,25 @@ laya-rs = { version = "0.1", features = ["cuda"] }       # NVIDIA
 laya-rs = { version = "0.1", features = ["metal"] }      # Apple GPU
 ```
 
-Two things worth knowing before sizing a deployment:
-
-- **Sequences pad to the longest question in the batch, not to `max_len`**, so short states stay
-  cheap.
-- **Questions are not free.** Each one is its own row carrying its own copy of the state, so
-  fifteen questions cost about ten times one. Batching buys roughly 1.5x in ms/question by
-  filling the matrix multiplies better. What the architecture buys is the absence of decoding:
-  the answer is read off the `[MASK]` markers in the same pass.
-
-An `Agent` holds its weights resident — about 1.8 GiB for `english`, 1.3 GiB for `multilingual`,
-with a load-time peak roughly 0.6 GiB above that. `Router` keeps one checkpoint resident by
-default and evicts least-recently-used; `preload` raises the cap to fit what you preload.
-
----
+Each question is its own batch row carrying a copy of the state, so 15 questions cost about 10x
+one. Sequences pad to the longest row in the batch, not to `max_len`.
 
 ## Fidelity to the reference
 
-The sequence format, decision head, calibration buckets, confidence formula and routing rules are
-ported from Laya's published implementation and match it structurally:
+Sequence format, decision head, calibration and routing are ported from Laya's implementation:
 
 ```
 [CLS] <type> question: <instructions> [SEP] [MASK] opt0 [MASK] opt1 ... [SEP] <state> [SEP]
 ```
 
-Each `[MASK]` is a marker; the hidden state at that position is what the scorer reads. States are
-serialised with Python's `json.dumps(..., ensure_ascii=False)` separators — `{"a": 1, "b": 2}`,
-spaces included — because a different string is a different tokenisation, which is a different
-prediction.
-
-Known differences from running the Python package on a GPU:
-
-- **f32, not autocast fp16/bf16.** The reference runs the encoder under autocast on CUDA. Small
-  probability shifts are expected; the answers and their ordering are not affected.
-- **Temperatures are clamped.** See above. The reference applies the shipped values as they are.
-- The illustrative numbers in Laya's own README were produced on a T4 in fp16 against whatever
-  checkpoint revision was current then, so treat them as indicative rather than as a fixture.
-
-`cargo test` runs the ported logic offline in well under a second. The end-to-end tests are
-`#[ignore]`d because they pull ~1.7 GB of weights:
+Differences from the Python package on GPU: f32 instead of autocast fp16 (small probability
+shifts, same answers), and clamped temperatures.
 
 ```console
-cargo test --release -- --ignored --nocapture
+cargo test                                          # offline, < 1 s
+cargo test --release -- --ignored --nocapture       # end-to-end, downloads ~1.7 GB
 ```
-
-They check that the answers are well-formed, that opposite states separate (a forward pass wired
-up wrongly still returns well-formed numbers — it just stops discriminating), and that the router
-sends Hindi to the checkpoint that can read it and still answers `billing`.
-
----
 
 ## Licence
 
-Apache-2.0, matching Laya. See `NOTICE` for attribution: this is a port, the checkpoints are the
-upstream authors' work, and the ModernBERT backbone comes from `candle-transformers`.
+Apache-2.0, matching Laya. See `NOTICE` for attribution.

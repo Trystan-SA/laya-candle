@@ -92,9 +92,7 @@ impl HeadLayer {
 
     fn forward(&self, xs: &Tensor, bias: &Tensor) -> Result<Tensor> {
         let xs = (xs + self.self_attn.forward(&self.norm1.forward(xs)?, bias)?)?;
-        let ff = self
-            .linear2
-            .forward(&self.linear1.forward(&self.norm2.forward(&xs)?)?.relu()?)?;
+        let ff = self.linear2.forward(&self.linear1.forward(&self.norm2.forward(&xs)?)?.relu()?)?;
         Ok((xs + ff)?)
     }
 }
@@ -204,10 +202,7 @@ impl DecisionModel {
 
         // Confidence features for the action head, mirroring the training-time definition.
         let p = softmax_last_dim(&logits)?;
-        let n_options = marker_mask
-            .to_dtype(DTYPE)?
-            .sum_keepdim(1)?
-            .clamp(2f32, f32::MAX)?;
+        let n_options = marker_mask.to_dtype(DTYPE)?.sum_keepdim(1)?.clamp(2f32, f32::MAX)?;
         let ent = (p.clamp(1e-9f32, 1f32)?.log()? * &p)?
             .sum_keepdim(1)?
             .neg()?
@@ -215,10 +210,7 @@ impl DecisionModel {
         let (sorted, _) = p.sort_last_dim(false)?;
         let top1 = sorted.narrow(1, 0, 1)?;
         let top2 = sorted.narrow(1, 1, 1)?;
-        let feats = Tensor::cat(
-            &[top1.clone(), (&top1 - &top2)?, ent, (n_options / 255.0)?],
-            1,
-        )?;
+        let feats = Tensor::cat(&[top1.clone(), (&top1 - &top2)?, ent, (n_options / 255.0)?], 1)?;
 
         let pooled = hs.i((.., 0, ..))?;
         let act_logits = self
@@ -226,9 +218,6 @@ impl DecisionModel {
             .forward(&self.act_fc1.forward(&Tensor::cat(&[pooled, feats], 1)?)?.gelu_erf()?)?;
         let act_probs = softmax_last_dim(&act_logits)?;
 
-        Ok(Forward {
-            logits: logits.to_vec2::<f32>()?,
-            act_probs: act_probs.to_vec2::<f32>()?,
-        })
+        Ok(Forward { logits: logits.to_vec2::<f32>()?, act_probs: act_probs.to_vec2::<f32>()? })
     }
 }

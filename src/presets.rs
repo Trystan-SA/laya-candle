@@ -34,7 +34,9 @@ pub fn triage() -> Questions {
         .with("refund_requested", Question::noul("Does the customer ask for money back?"))
         .with(
             "churn_risk",
-            Question::noul("Does `message` suggest the customer may leave for a competitor or cancel?"),
+            Question::noul(
+                "Does `message` suggest the customer may leave for a competitor or cancel?",
+            ),
         )
 }
 
@@ -159,7 +161,10 @@ pub fn model_router() -> Questions {
         .with(
             "domain",
             Question::choice("What domain does `request` belong to?")
-                .option("code", "software engineering, programming, refactoring, architecture, debugging")
+                .option(
+                    "code",
+                    "software engineering, programming, refactoring, architecture, debugging",
+                )
                 .option("math_or_logic", "mathematics, logic puzzles, proofs, complex calculation")
                 .option("writing", "creative writing, essays, emails, blog posts, copywriting")
                 .option("factual_lookup", "facts, definitions, trivia, history")
@@ -168,7 +173,9 @@ pub fn model_router() -> Questions {
         )
         .with(
             "needs_tools",
-            Question::noul("Does answering `request` require external tools, search or private data?"),
+            Question::noul(
+                "Does answering `request` require external tools, search or private data?",
+            ),
         )
         .with(
             "is_sensitive",
@@ -176,8 +183,10 @@ pub fn model_router() -> Questions {
         )
 }
 
-/// Every preset: the names it answers to (the first one is listed) and how to build it.
-const PRESETS: [(&[&str], fn() -> Questions); 5] = [
+/// The names a preset answers to (the first one is listed) and how to build it.
+type Preset = (&'static [&'static str], fn() -> Questions);
+
+const PRESETS: [Preset; 5] = [
     (&["triage"], triage),
     (&["email"], || email(None)),
     (&["guard"], guard),
@@ -209,14 +218,25 @@ mod tests {
                 assert!(!q.render_options(id).unwrap().is_empty());
             }
         }
-        assert!(by_name("model-router").is_some());
+    }
+
+    #[test]
+    fn names_are_matched_loosely_and_listed_once() {
+        assert!(by_name(" TRIAGE ").is_some());
+        assert!(by_name("Model-Router").is_some());
+        assert!(by_name("nope").is_none());
+        assert_eq!(
+            names().collect::<Vec<_>>(),
+            ["triage", "email", "guard", "moderation", "router"]
+        );
     }
 
     #[test]
     fn email_categories_can_be_replaced() {
-        let cats = [("a".to_string(), "first".to_string()), ("b".to_string(), "second".to_string())]
-            .into_iter()
-            .collect();
+        let cats =
+            [("a".to_string(), "first".to_string()), ("b".to_string(), "second".to_string())]
+                .into_iter()
+                .collect();
         let qs = email(Some(cats));
         assert_eq!(qs.0["category"].labels("category").unwrap(), vec!["a", "b"]);
     }

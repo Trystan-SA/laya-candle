@@ -97,6 +97,8 @@ pub mod router;
 
 mod model;
 mod sequence;
+#[cfg(test)]
+mod testutil;
 mod tokenizer;
 
 pub use agent::Agent;

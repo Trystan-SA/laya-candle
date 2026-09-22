@@ -51,9 +51,11 @@ fn main() -> Result<(), laya::Error> {
     let department = out.get("department").unwrap();
     println!("\n  department  {}", department.as_choice().unwrap());
     println!("              confidence {:.2}", department.confidence());
-    println!("              billing at {:.2}, technical at {:.2}",
+    println!(
+        "              billing at {:.2}, technical at {:.2}",
         department.probability("billing").unwrap(),
-        department.probability("technical").unwrap());
+        department.probability("technical").unwrap()
+    );
 
     println!("  urgency     {:.2} / 2", out.get("urgency").unwrap().as_score().unwrap());
     println!("  churn_risk  {:.3}", out.get("churn_risk").unwrap().as_noul().unwrap());

@@ -68,3 +68,29 @@ impl From<tokenizers::Error> for Error {
         Error::Tokenizer(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::scratch_dir;
+
+    #[test]
+    fn read_json_names_the_file_in_both_failures() {
+        let dir = scratch_dir("read-json");
+
+        let err = read_json::<serde_json::Value>(&dir.join("missing.json")).unwrap_err();
+        assert!(
+            matches!(err, Error::Io { ref path, .. } if path.ends_with("missing.json")),
+            "{err}"
+        );
+
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "{ not json").unwrap();
+        let err = read_json::<serde_json::Value>(&broken).unwrap_err();
+        assert!(
+            matches!(err, Error::Json { ref path, .. } if path.ends_with("broken.json")),
+            "{err}"
+        );
+        assert!(err.to_string().contains("invalid JSON"), "{err}");
+    }
+}

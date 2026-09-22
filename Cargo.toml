@@ -2,7 +2,7 @@
 name = "laya-rs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Non-autoregressive typed-decision engine (choice / score / noul) with calibrated probabilities — a pure-Rust port of laya, runnable in any project."
 repository = "https://github.com/somanyways/laya-rs"
 license = "Apache-2.0"
@@ -68,7 +68,7 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 thiserror = "2.0.20"
-tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 anyhow = { version = "1.0.104", optional = true }
 clap = { version = "4.6.7", features = ["derive"], optional = true }

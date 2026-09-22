@@ -82,7 +82,8 @@ fn predict(args: PredictArgs) -> anyhow::Result<()> {
     let questions = read_questions(&args.questions)?;
 
     let mut router = Router::builder();
-    let mut opts = RouteOptions { model: args.model.clone(), lang: args.lang.clone(), ..Default::default() };
+    let mut opts =
+        RouteOptions { model: args.model.clone(), lang: args.lang.clone(), ..Default::default() };
     if let Some(dir) = &args.checkpoint {
         // The directory stands in for whichever checkpoint `--model` names (English by default),
         // and that checkpoint is forced so routing never looks elsewhere.
@@ -107,9 +108,7 @@ fn route(args: RouteArgs) -> anyhow::Result<()> {
     let state = read_state(&args.state)?;
     let questions = read_questions(&args.questions)?;
     // Routing never touches the weights, so nothing is downloaded here.
-    let router = Router::builder()
-        .auto_task_detection(args.auto_task_detection)
-        .build()?;
+    let router = Router::builder().auto_task_detection(args.auto_task_detection).build()?;
     let decision = router.route(&state, &questions, &Default::default())?;
     println!("{}", serde_json::to_string_pretty(&decision)?);
     Ok(())
@@ -144,7 +143,9 @@ fn read_source(arg: &str) -> anyhow::Result<Option<String>> {
         return read_stdin().map(Some);
     }
     match arg.strip_prefix('@') {
-        Some(path) => std::fs::read_to_string(path).with_context(|| format!("reading {path}")).map(Some),
+        Some(path) => {
+            std::fs::read_to_string(path).with_context(|| format!("reading {path}")).map(Some)
+        }
         None => Ok(None),
     }
 }
@@ -186,16 +187,12 @@ fn print_summary(out: &Prediction) {
     for (id, answer) in &out.answers {
         let (kind, value) = match answer {
             Answer::Choice { choice, .. } => ("choice", choice.clone()),
-            Answer::Score { score, legend, .. } => (
-                "score",
-                format!("{score:.2} / {}", legend.len().saturating_sub(1)),
-            ),
+            Answer::Score { score, legend, .. } => {
+                ("score", format!("{score:.2} / {}", legend.len().saturating_sub(1)))
+            }
             Answer::Noul { noul, .. } => ("noul", format!("{noul:.3}")),
         };
-        println!(
-            "{id:<width$}  {kind:<6}  {value:<28}  confidence {:.2}",
-            answer.confidence()
-        );
+        println!("{id:<width$}  {kind:<6}  {value:<28}  confidence {:.2}", answer.confidence());
     }
     println!("\n{} input tokens, 0 generated", out.usage.input_tokens);
 }

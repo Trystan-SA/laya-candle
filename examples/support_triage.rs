@@ -130,7 +130,8 @@ fn decide(out: &Prediction, plan: &str) -> Triage {
 
     // The score is ordinal, so the expected level is a usable number: weight it, add the
     // boolean risks, and let the plan break ties.
-    let pressure = urgency + 0.5 * frustration + 2.0 * churn + if plan == "enterprise" { 0.8 } else { 0.0 };
+    let pressure =
+        urgency + 0.5 * frustration + 2.0 * churn + if plan == "enterprise" { 0.8 } else { 0.0 };
     let priority = match pressure {
         p if p >= 3.5 => "P1",
         p if p >= 2.0 => "P2",
@@ -175,9 +176,8 @@ fn main() -> Result<(), laya::Error> {
     // Detection costs microseconds; a cold checkpoint build costs seconds. An inbox that mixes
     // languages must preload, or it rebuilds a model on every switch.
     let mut report = common::Report::new();
-    let router = Router::builder()
-        .preload([ModelName::English, ModelName::Multilingual])
-        .build()?;
+    let router =
+        Router::builder().preload([ModelName::English, ModelName::Multilingual]).build()?;
     report.lap("2 checkpoints resident");
     println!();
 

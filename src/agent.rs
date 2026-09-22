@@ -78,13 +78,8 @@ impl Agent {
         let weights = candle_core::safetensors::load(&cp.weights, &Device::Cpu)?;
         verify(&weights, &cp.label)?;
 
-        let model = DecisionModel::load(
-            weights,
-            &enc_cfg,
-            config.head_layers,
-            config.n_act(),
-            device,
-        )?;
+        let model =
+            DecisionModel::load(weights, &enc_cfg, config.head_layers, config.n_act(), device)?;
 
         let calibration = Calibration::from_config(&config);
         if !calibration.clamped.is_empty() {
@@ -186,7 +181,12 @@ impl Agent {
                         .max_by(|a, b| a.1.total_cmp(b.1))
                         .map(|(label, _)| label.clone())
                         .expect("a choice has at least one option");
-                    Answer::Choice { choice, probabilities: distribution(&item.labels, &p), confidence, action }
+                    Answer::Choice {
+                        choice,
+                        probabilities: distribution(&item.labels, &p),
+                        confidence,
+                        action,
+                    }
                 }
                 QType::Score => {
                     let score = p.iter().enumerate().map(|(i, v)| i as f32 * v).sum::<f32>();
@@ -237,4 +237,40 @@ fn verify(weights: &HashMap<String, candle_core::Tensor>, label: &str) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Tensor};
+
+    fn weights(keys: &[&str]) -> HashMap<String, Tensor> {
+        keys.iter()
+            .map(|k| (k.to_string(), Tensor::zeros(1, DType::F32, &Device::Cpu).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_file_without_the_decision_head_is_refused_at_load() {
+        let complete = [
+            "encoder.embeddings.weight",
+            "type_emb.weight",
+            "scorer.1.weight",
+            "act_head.0.weight",
+        ];
+        assert!(verify(&weights(&complete), "cp").is_ok());
+
+        let err = verify(&weights(&complete[..3]), "cp").unwrap_err();
+        assert!(
+            matches!(err, Error::Checkpoint(ref m) if m.starts_with("cp:") && m.contains("act_head.")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_distribution_is_rounded_and_keeps_label_order() {
+        let d = distribution(&["b".to_string(), "a".to_string()], &[0.123456, 0.876544]);
+        assert_eq!(d.keys().collect::<Vec<_>>(), ["b", "a"]);
+        assert_eq!(d["b"], 0.1235);
+    }
 }

@@ -26,9 +26,8 @@ fn main() -> Result<(), laya::Error> {
 
     // Preload if you serve mixed traffic. At the default residency of one checkpoint, every
     // language switch would rebuild a model — seconds per request instead of milliseconds.
-    let router = Router::builder()
-        .preload([ModelName::English, ModelName::Multilingual])
-        .build()?;
+    let router =
+        Router::builder().preload([ModelName::English, ModelName::Multilingual]).build()?;
     report.lap("2 checkpoints resident");
 
     let questions = Questions::new().with(

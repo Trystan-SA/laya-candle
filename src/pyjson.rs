@@ -42,9 +42,7 @@ impl Formatter for PythonFormatter {
 pub fn dumps(value: &Value) -> String {
     let mut buf = Vec::new();
     let mut ser = Serializer::with_formatter(&mut buf, PythonFormatter);
-    value
-        .serialize(&mut ser)
-        .expect("serialising an in-memory Value cannot fail");
+    value.serialize(&mut ser).expect("serialising an in-memory Value cannot fail");
     String::from_utf8(buf).expect("serde_json only ever emits UTF-8")
 }
 

@@ -21,7 +21,10 @@ const SCRIPT_RANGES: &[(&str, &[(u32, u32)])] = &[
     ("cyrillic", &[(0x0400, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F)]),
     ("armenian", &[(0x0530, 0x058F)]),
     ("hebrew", &[(0x0590, 0x05FF)]),
-    ("arabic", &[(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)]),
+    (
+        "arabic",
+        &[(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)],
+    ),
     ("devanagari", &[(0x0900, 0x097F), (0xA8E0, 0xA8FF)]),
     ("bengali", &[(0x0980, 0x09FF)]),
     ("gurmukhi", &[(0x0A00, 0x0A7F)]),
@@ -55,23 +58,58 @@ const EN_STOPWORDS: &[&str] = &[
 /// (`de` / `la` / `le` / `un` / `e` / `que`), so a margin is required before calling something
 /// non-English. Order matters: it decides ties between languages with equal hit counts.
 const STOPWORDS: &[(&str, &[&str])] = &[
-    ("fr", &["le", "la", "les", "des", "une", "est", "pour", "dans", "que", "qui", "avec", "sur",
-             "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce"]),
-    ("de", &["der", "die", "das", "und", "ist", "ein", "eine", "den", "dem", "nicht", "mit", "für",
-             "auf", "von", "zu", "sich", "auch", "werden", "wurde", "haben", "sind", "oder", "aber"]),
-    ("es", &["el", "los", "las", "que", "por", "con", "para", "una", "es", "se", "del", "como",
-             "pero", "son", "está", "este", "esta", "todo", "más", "muy", "hay", "sus"]),
-    ("pt", &["os", "as", "que", "em", "um", "uma", "para", "com", "não", "é", "se", "do", "da",
-             "dos", "das", "mas", "são", "está", "este", "esta", "muito", "pelo", "pela"]),
-    ("it", &["il", "lo", "gli", "che", "di", "per", "con", "non", "è", "si", "del", "della", "sono",
-             "questo", "questa", "anche", "come", "più", "nella", "alla"]),
-    ("nl", &["het", "een", "van", "is", "op", "te", "dat", "niet", "met", "voor", "zijn", "aan",
-             "door", "maar", "ook", "worden", "deze", "naar", "wordt"]),
+    (
+        "fr",
+        &[
+            "le", "la", "les", "des", "une", "est", "pour", "dans", "que", "qui", "avec", "sur",
+            "pas", "plus", "nous", "vous", "être", "cette", "mais", "sont", "ont", "aux", "ce",
+        ],
+    ),
+    (
+        "de",
+        &[
+            "der", "die", "das", "und", "ist", "ein", "eine", "den", "dem", "nicht", "mit", "für",
+            "auf", "von", "zu", "sich", "auch", "werden", "wurde", "haben", "sind", "oder", "aber",
+        ],
+    ),
+    (
+        "es",
+        &[
+            "el", "los", "las", "que", "por", "con", "para", "una", "es", "se", "del", "como",
+            "pero", "son", "está", "este", "esta", "todo", "más", "muy", "hay", "sus",
+        ],
+    ),
+    (
+        "pt",
+        &[
+            "os", "as", "que", "em", "um", "uma", "para", "com", "não", "é", "se", "do", "da",
+            "dos", "das", "mas", "são", "está", "este", "esta", "muito", "pelo", "pela",
+        ],
+    ),
+    (
+        "it",
+        &[
+            "il", "lo", "gli", "che", "di", "per", "con", "non", "è", "si", "del", "della", "sono",
+            "questo", "questa", "anche", "come", "più", "nella", "alla",
+        ],
+    ),
+    (
+        "nl",
+        &[
+            "het", "een", "van", "is", "op", "te", "dat", "niet", "met", "voor", "zijn", "aan",
+            "door", "maar", "ook", "worden", "deze", "naar", "wordt",
+        ],
+    ),
     // Romanian words its Romance neighbours do not share: `la`, `o`, `un`, `de`, `pe`, `ca` are
     // deliberately left out so adding `ro` cannot steal a French or Spanish state.
-    ("ro", &["și", "să", "este", "sunt", "care", "pentru", "din", "dar", "după", "până", "fără",
-             "ale", "lui", "în", "fost", "acum", "vreau", "trebuie", "foarte", "acest", "această",
-             "acesta", "aceasta", "mi", "ți", "vă", "nu"]),
+    (
+        "ro",
+        &[
+            "și", "să", "este", "sunt", "care", "pentru", "din", "dar", "după", "până", "fără",
+            "ale", "lui", "în", "fost", "acum", "vreau", "trebuie", "foarte", "acest", "această",
+            "acesta", "aceasta", "mi", "ți", "vă", "nu",
+        ],
+    ),
 ];
 
 /// Letters ordinary English does not use.
@@ -81,13 +119,13 @@ const STOPWORDS: &[(&str, &[&str])] = &[
 /// multilingual checkpoint and silently handing it to the one that cannot read it.
 const NON_EN_DIACRITICS: &str = concat!(
     "àâäãáåçéèêëíìîïñóòôöõøúùûüýÿßæœ", // Western European
-    "ăâîșțşţ",                          // Romanian
-    "ąćęłńśźż",                         // Polish
-    "čďěňřšťůž",                        // Czech / Slovak
-    "őű",                               // Hungarian
-    "ğı",                               // Turkish (text is lowercased before matching)
-    "āēģīķļņūž",                        // Baltic
-    "đ",                                // Serbo-Croatian / Vietnamese
+    "ăâîșțşţ",                         // Romanian
+    "ąćęłńśźż",                        // Polish
+    "čďěňřšťůž",                       // Czech / Slovak
+    "őű",                              // Hungarian
+    "ğı",                              // Turkish (text is lowercased before matching)
+    "āēģīķļņūž",                       // Baltic
+    "đ",                               // Serbo-Croatian / Vietnamese
 );
 
 /// A diacritic rate above this is taken as evidence the text is not English, even when no
@@ -189,10 +227,7 @@ fn dominant_script(counts: &ScriptCounts) -> &'static str {
 /// Fraction of alphabetic characters belonging to each detected script.
 fn profile_of(counts: &ScriptCounts) -> BTreeMap<String, f32> {
     let total: usize = counts.values().sum();
-    counts
-        .iter()
-        .map(|(name, n)| (name.to_string(), *n as f32 / total as f32))
-        .collect()
+    counts.iter().map(|(name, n)| (name.to_string(), *n as f32 / total as f32)).collect()
 }
 
 /// Dominant script of `text`, or `"unknown"` when it holds no letters.
@@ -214,7 +249,8 @@ fn latin_profile(text: &str) -> LatinProfile {
     let diacritic_rate = diac as f32 / n_chars.max(1) as f32;
     let looks_non_english = diacritic_rate >= NON_EN_DIACRITIC_RATE;
 
-    let ws: Vec<&str> = lowered.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).collect();
+    let ws: Vec<&str> =
+        lowered.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).collect();
     if ws.len() < 4 {
         return LatinProfile { language: None, diacritic_rate, looks_non_english };
     }
@@ -265,7 +301,9 @@ pub fn analyse(state: &Value) -> Detection {
     // to the English one.
     let is_english = match &latin {
         None => script == "unknown",
-        Some(l) => language.as_deref() == Some("en") || (language.is_none() && !l.looks_non_english),
+        Some(l) => {
+            language.as_deref() == Some("en") || (language.is_none() && !l.looks_non_english)
+        }
     };
 
     Detection {
@@ -294,7 +332,8 @@ mod tests {
 
     #[test]
     fn english_is_routed_to_the_english_checkpoint() {
-        let d = analyse(&json!({"body": "We were billed twice for March and would like a refund."}));
+        let d =
+            analyse(&json!({"body": "We were billed twice for March and would like a refund."}));
         assert_eq!(d.script, "latin");
         assert_eq!(d.language.as_deref(), Some("en"));
         assert!(d.is_english);
@@ -332,5 +371,20 @@ mod tests {
     fn detection_text_is_capped_in_chars_not_bytes() {
         let long = "मुझसे ".repeat(2000);
         assert_eq!(state_text(&json!(long)).chars().count(), MAX_DETECTION_CHARS);
+    }
+
+    #[test]
+    fn a_tie_between_scripts_keeps_the_first_seen() {
+        assert_eq!(detect_script("ab 请尽"), "latin");
+        assert_eq!(detect_script("请尽 ab"), "han");
+    }
+
+    #[test]
+    fn short_latin_text_without_foreign_letters_stays_english() {
+        let d = analyse(&json!("ok thanks"));
+        assert!(d.language.is_none());
+        assert!(d.is_english);
+        assert_eq!(d.diacritic_rate, 0.0);
+        assert_eq!(d.non_latin_fraction, 0.0);
     }
 }

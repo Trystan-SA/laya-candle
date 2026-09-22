@@ -28,7 +28,7 @@ laya-rs = "0.1"
 serde_json = "1"
 ```
 
-Rust 1.85+. A C compiler is needed once (`candle-core` pulls in `onig`).
+Rust 1.88+. A C compiler is needed once (`candle-core` pulls in `onig`).
 
 Library only, no CLI:
 
@@ -97,7 +97,7 @@ where it can go and what it can sit inside of:
   webhook inside the process that received it, without a round trip to a sidecar service.
 
   ```rust
-  let agent = Arc::new(Agent::from_hub("convaiinnovations/laya", Some("english"))?);
+  let agent = Arc::new(Agent::from_hub("convaiinnovations/laya", None)?);
   let guard = presets::guard();
 
   // in each handler:

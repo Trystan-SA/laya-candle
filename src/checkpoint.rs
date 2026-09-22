@@ -111,3 +111,51 @@ impl Checkpoint {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::scratch_dir;
+
+    fn touch(dir: &Path, name: &str) {
+        let p = dir.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"").unwrap();
+    }
+
+    #[test]
+    fn a_missing_directory_is_rejected() {
+        let err = Checkpoint::from_dir("/definitely/not/here").unwrap_err();
+        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("not a directory")), "{err}");
+    }
+
+    #[test]
+    fn the_first_missing_file_is_named() {
+        let dir = scratch_dir("cp-missing");
+        touch(&dir, AGENT_CONFIG);
+        let err = Checkpoint::from_dir(&dir).unwrap_err();
+        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains(WEIGHTS)), "{err}");
+    }
+
+    #[test]
+    fn the_tokenizer_config_is_optional() {
+        let dir = scratch_dir("cp-complete");
+        for name in &FILES[..4] {
+            touch(&dir, name);
+        }
+        let cp = Checkpoint::from_dir(&dir).unwrap();
+        assert_eq!(cp.weights, dir.join(WEIGHTS));
+        assert_eq!(cp.label, dir.display().to_string());
+        assert!(cp.tokenizer_config.is_none());
+
+        touch(&dir, TOKENIZER_CONFIG);
+        let cp = Checkpoint::from_dir(&dir).unwrap();
+        assert_eq!(cp.tokenizer_config, Some(dir.join(TOKENIZER_CONFIG)));
+    }
+
+    #[test]
+    fn hub_checkpoints_are_labelled_repo_slash_subfolder() {
+        assert_eq!(hub_label("org/laya", None), "org/laya");
+        assert_eq!(hub_label("org/laya", Some("multilingual")), "org/laya/multilingual");
+    }
+}

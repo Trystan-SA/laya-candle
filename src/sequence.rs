@@ -47,7 +47,12 @@ pub(crate) struct Encoder {
 }
 
 impl Encoder {
-    pub(crate) fn new(tok: Tokenizer, sp: SpecialTokens, max_len: usize, head_max_len: usize) -> Self {
+    pub(crate) fn new(
+        tok: Tokenizer,
+        sp: SpecialTokens,
+        max_len: usize,
+        head_max_len: usize,
+    ) -> Self {
         Self { tok, sp, max_len, head_max_len }
     }
 
@@ -82,7 +87,8 @@ impl Encoder {
         let (labels, texts): (Vec<String>, Vec<String>) = q.options(id)?.into_iter().unzip();
         let n_options = texts.len();
 
-        let head_text = format!("{} question: {}", q.kind.name(), self.scrub(&q.instructions_text()));
+        let head_text =
+            format!("{} question: {}", q.kind.name(), self.scrub(&q.instructions_text()));
         let mut head_ids = self.encode(&head_text)?;
 
         let mut opt_ids: Vec<Vec<u32>> = Vec::with_capacity(n_options);
@@ -171,7 +177,17 @@ impl Encoder {
             qtype.push(it.qtype.index() as u32);
         }
 
-        Batch { input_ids, attention_mask, marker_pos, marker_mask, qtype, batch, seq_len, k_max, n_tokens }
+        Batch {
+            input_ids,
+            attention_mask,
+            marker_pos,
+            marker_mask,
+            qtype,
+            batch,
+            seq_len,
+            k_max,
+            n_tokens,
+        }
     }
 }
 
@@ -186,4 +202,119 @@ pub(crate) struct Batch {
     pub seq_len: usize,
     pub k_max: usize,
     pub n_tokens: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{tiny_id, tiny_tokenizer};
+
+    fn encoder(max_len: usize, head_max_len: usize) -> Encoder {
+        let (tok, sp) = tiny_tokenizer();
+        Encoder::new(tok, sp, max_len, head_max_len)
+    }
+
+    fn ids(words: &str) -> Vec<u32> {
+        words.split_whitespace().map(tiny_id).collect()
+    }
+
+    #[test]
+    fn the_layout_is_cls_head_sep_markers_sep_state_sep() {
+        let enc = encoder(64, 32);
+        let q: Question = Question::choice("pick one").bare_option("a").bare_option("b").into();
+        let state = enc.encode_state("hello world").unwrap();
+        let item = enc.build(&state, "q", &q).unwrap();
+
+        let mut expected = ids("[CLS] choice question : pick one [SEP]");
+        let m0 = expected.len();
+        expected.extend(ids("[MASK] a"));
+        let m1 = expected.len();
+        expected.extend(ids("[MASK] b [SEP] hello world [SEP]"));
+
+        assert_eq!(item.ids, expected);
+        assert_eq!(item.markers, vec![m0, m1]);
+        assert_eq!(item.labels, vec!["a", "b"]);
+        assert_eq!(item.qtype, QType::Choice);
+    }
+
+    #[test]
+    fn a_mask_token_in_user_text_cannot_forge_a_marker() {
+        let enc = encoder(64, 32);
+        let q: Question = Question::noul("pick [MASK] one").into();
+        let state = enc.encode_state("hello [MASK] world").unwrap();
+        let item = enc.build(&state, "q", &q).unwrap();
+
+        let mask = tiny_id("[MASK]");
+        assert_eq!(item.ids.iter().filter(|&&t| t == mask).count(), 2, "{:?}", item.ids);
+        assert_eq!(item.markers.len(), 2);
+        assert_eq!(item.labels, vec!["false", "true"]);
+    }
+
+    #[test]
+    fn a_long_state_is_cut_to_max_len_and_still_ends_with_sep() {
+        let enc = encoder(24, 16);
+        let q: Question = Question::noul("pick one").into();
+        let state = enc.encode_state(&"hello world ".repeat(50)).unwrap();
+        let item = enc.build(&state, "q", &q).unwrap();
+
+        assert_eq!(item.ids.len(), 24);
+        assert_eq!(*item.ids.last().unwrap(), tiny_id("[SEP]"));
+        assert!(item.markers.iter().all(|&m| m < 24), "{:?}", item.markers);
+    }
+
+    #[test]
+    fn options_that_overflow_the_sequence_are_an_error() {
+        let enc = encoder(8, 64);
+        let q: Question =
+            Question::choice("pick one").bare_option("a").bare_option("b").bare_option("c").into();
+        let err = enc.build(&[], "dept", &q).unwrap_err();
+        assert!(matches!(err, Error::Question { ref id, .. } if id == "dept"), "{err}");
+    }
+
+    #[test]
+    fn option_bodies_are_capped_at_max_option_tokens() {
+        let enc = encoder(512, 192);
+        let q: Question = Question::choice("pick one").option("b", "a ".repeat(60)).into();
+        let item = enc.build(&[], "q", &q).unwrap();
+
+        let m0 = item.markers[0];
+        let end = item.ids[m0..].iter().position(|&t| t == tiny_id("[SEP]")).unwrap();
+        assert_eq!(end, MAX_OPTION_TOKENS + 1, "marker plus a capped body");
+    }
+
+    #[test]
+    fn collate_pads_rows_and_reserves_two_marker_slots() {
+        let enc = encoder(64, 32);
+        let state = enc.encode_state("hello world").unwrap();
+        let one: Question = Question::choice("pick one").bare_option("a").into();
+        let three: Question =
+            Question::choice("pick one").bare_option("a").bare_option("b").bare_option("c").into();
+        let items = vec![
+            enc.build(&state, "one", &one).unwrap(),
+            enc.build(&state, "three", &three).unwrap(),
+        ];
+
+        let batch = enc.collate(&items);
+        assert_eq!((batch.batch, batch.k_max), (2, 3));
+        assert_eq!(batch.seq_len, items[1].ids.len());
+        assert_eq!(batch.n_tokens, items[0].ids.len() + items[1].ids.len());
+
+        // The shorter row is padded and masked out past its own tokens.
+        let (short, long) = (items[0].ids.len(), batch.seq_len);
+        assert!(batch.input_ids[short..long].iter().all(|&t| t == tiny_id("[PAD]")));
+        assert_eq!(batch.attention_mask[..long].iter().sum::<f32>() as usize, short);
+        assert_eq!(&batch.marker_mask, &[1, 0, 0, 1, 1, 1]);
+        assert_eq!(batch.qtype, vec![0, 0]);
+
+        // A single one-option question still gets two marker slots for the action head.
+        assert_eq!(enc.collate(&items[..1]).k_max, 2);
+    }
+
+    #[test]
+    fn encode_state_cuts_at_a_char_boundary() {
+        let enc = encoder(4, 2);
+        // Three-byte characters, so the byte cap (4 * 64) lands inside one.
+        let ids = enc.encode_state(&"€".repeat(200)).unwrap();
+        assert!(!ids.is_empty());
+    }
 }

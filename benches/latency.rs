@@ -48,7 +48,10 @@ fn pool() -> Questions {
 fn main() -> Result<(), laya::Error> {
     let before = common::rss().unwrap_or(0);
     println!("laya-rs latency benchmark");
-    println!("build: {}", if cfg!(debug_assertions) { "debug — numbers are meaningless" } else { "release" });
+    println!(
+        "build: {}",
+        if cfg!(debug_assertions) { "debug — numbers are meaningless" } else { "release" }
+    );
 
     // --- load cost -------------------------------------------------------------------------
     println!("\n## checkpoint load\n");
@@ -79,7 +82,10 @@ fn main() -> Result<(), laya::Error> {
     let state = state();
     for (name, agent) in &agents {
         println!("\n## {name}: cost of asking more questions in one call\n");
-        println!("{:>9} {:>11} {:>13} {:>8} {:>10}", "questions", "median ms", "ms/question", "tokens", "vs 1 q");
+        println!(
+            "{:>9} {:>11} {:>13} {:>8} {:>10}",
+            "questions", "median ms", "ms/question", "tokens", "vs 1 q"
+        );
 
         let mut baseline = 0.0;
         for n in [1usize, 2, 5, 10, 15] {

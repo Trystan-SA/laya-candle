@@ -347,22 +347,25 @@ mod tests {
 
     #[test]
     fn choice_criteria_order_is_preserved() {
-        let q: Question =
-            serde_json::from_str(r#"{"type":"choice","instructions":"x","criteria":{"z":null,"a":null,"m":null}}"#)
-                .unwrap();
+        let q: Question = serde_json::from_str(
+            r#"{"type":"choice","instructions":"x","criteria":{"z":null,"a":null,"m":null}}"#,
+        )
+        .unwrap();
         assert_eq!(q.labels("q").unwrap(), vec!["z", "a", "m"]);
     }
 
     #[test]
     fn choice_accepts_a_bare_list_of_labels() {
         let q: Question =
-            serde_json::from_str(r#"{"type":"choice","instructions":"x","criteria":["a","b"]}"#).unwrap();
+            serde_json::from_str(r#"{"type":"choice","instructions":"x","criteria":["a","b"]}"#)
+                .unwrap();
         assert_eq!(q.render_options("q").unwrap(), vec!["a", "b"]);
     }
 
     #[test]
     fn score_options_are_numbered_levels() {
-        let q: Question = Question::score("How urgent?").level("not urgent").level("critical").into();
+        let q: Question =
+            Question::score("How urgent?").level("not urgent").level("critical").into();
         assert_eq!(
             q.render_options("u").unwrap(),
             vec!["level 0: not urgent".to_string(), "level 1: critical".to_string()]
@@ -383,7 +386,8 @@ mod tests {
 
     #[test]
     fn noul_uses_its_own_wording_when_given() {
-        let q: Question = Question::noul("Phishing?").when_true("a scam").when_false("legitimate").into();
+        let q: Question =
+            Question::noul("Phishing?").when_true("a scam").when_false("legitimate").into();
         assert_eq!(
             q.render_options("p").unwrap(),
             vec!["false: legitimate".to_string(), "true: a scam".to_string()]
@@ -407,5 +411,50 @@ mod tests {
     fn a_choice_without_criteria_is_rejected() {
         let q = Question { kind: QType::Choice, instructions: json!("x"), criteria: None };
         assert!(q.render_options("dept").is_err());
+    }
+
+    #[test]
+    fn an_empty_choice_is_rejected_like_a_missing_one() {
+        for criteria in [json!({}), json!([])] {
+            let q = Question {
+                kind: QType::Choice,
+                instructions: json!("x"),
+                criteria: Some(criteria),
+            };
+            let err = q.labels("dept").unwrap_err();
+            assert!(matches!(err, Error::Question { ref id, .. } if id == "dept"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_score_needs_at_least_one_level() {
+        let q =
+            Question { kind: QType::Score, instructions: json!("x"), criteria: Some(json!([])) };
+        assert!(q.render_options("u").is_err());
+
+        let q: Question = Question::score("x").level("low").level("high").into();
+        assert_eq!(q.labels("u").unwrap(), vec!["0", "1"]);
+    }
+
+    #[test]
+    fn noul_labels_are_false_then_true() {
+        let q: Question = Question::noul("x").into();
+        assert_eq!(q.labels("n").unwrap(), vec!["false", "true"]);
+    }
+
+    #[test]
+    fn structured_instructions_render_as_json() {
+        let q =
+            Question { kind: QType::Noul, instructions: json!({"ask": "refund?"}), criteria: None };
+        assert_eq!(q.instructions_text(), r#"{"ask": "refund?"}"#);
+    }
+
+    #[test]
+    fn a_question_set_keeps_json_order_and_round_trips() {
+        let src = r#"{"zeta":{"type":"noul","instructions":"z"},"alpha":{"type":"score","instructions":"a","criteria":["lo","hi"]}}"#;
+        let qs = Questions::from_json(src).unwrap();
+        assert_eq!(qs.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["zeta", "alpha"]);
+        assert_eq!(serde_json::to_string(&qs).unwrap(), src);
+        assert!(Questions::from_json("[]").is_err());
     }
 }

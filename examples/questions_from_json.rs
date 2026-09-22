@@ -18,7 +18,8 @@ fn main() -> Result<(), laya::Error> {
 
     // 1. Load a question set written for the Python package.
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/data/questions.json");
-    let raw = std::fs::read_to_string(path).expect("examples/data/questions.json ships with the crate");
+    let raw =
+        std::fs::read_to_string(path).expect("examples/data/questions.json ships with the crate");
     let questions = Questions::from_json(&raw)?;
 
     println!("loaded {} questions from {path}", questions.len());
@@ -40,7 +41,10 @@ fn main() -> Result<(), laya::Error> {
                 .option("de", "German"),
         )
         .with("needs_manager", Question::noul("Does this need a manager's sign-off?"));
-    println!("\nbuilt in Rust, written back out as JSON:\n{}", serde_json::to_string_pretty(&built).unwrap());
+    println!(
+        "\nbuilt in Rust, written back out as JSON:\n{}",
+        serde_json::to_string_pretty(&built).unwrap()
+    );
 
     // 3. Both shapes run the same way.
     // A lazy router: nothing is downloaded or built until the first prediction needs it.
@@ -61,10 +65,7 @@ fn main() -> Result<(), laya::Error> {
     let out = router.predict(state, &built)?;
     report.lap("second prediction, checkpoint already resident");
     println!("\nbuilt in Rust:");
-    println!(
-        "  language_of_reply  {}",
-        out.get("language_of_reply").unwrap().as_choice().unwrap()
-    );
+    println!("  language_of_reply  {}", out.get("language_of_reply").unwrap().as_choice().unwrap());
     println!("  needs_manager      {:.3}", out.get("needs_manager").unwrap().as_noul().unwrap());
 
     report.finish();

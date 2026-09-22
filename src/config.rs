@@ -70,10 +70,9 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
 
     let u64_or = |key: &str, fallback: u64| v.get(key).and_then(Value::as_u64).unwrap_or(fallback);
     let usize_at = |key: &str| -> Result<usize> {
-        v.get(key)
-            .and_then(Value::as_u64)
-            .map(|n| n as usize)
-            .ok_or_else(|| Error::Checkpoint(format!("{}: missing or invalid {key:?}", path.display())))
+        v.get(key).and_then(Value::as_u64).map(|n| n as usize).ok_or_else(|| {
+            Error::Checkpoint(format!("{}: missing or invalid {key:?}", path.display()))
+        })
     };
 
     let rope = |kind: &str, flat: &str, fallback: f64| -> f64 {
@@ -104,4 +103,75 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
         local_rope_theta: rope("sliding_attention", "local_rope_theta", 10_000.0),
         classifier_config: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::testutil::scratch_dir;
+
+    #[test]
+    fn missing_fields_take_the_documented_defaults() {
+        let cfg: AgentConfig =
+            serde_json::from_value(json!({"encoder": "answerdotai/ModernBERT-large"})).unwrap();
+        assert_eq!(cfg.encoder, "answerdotai/ModernBERT-large");
+        assert_eq!((cfg.head_layers, cfg.max_len, cfg.head_max_len), (2, 512, 192));
+        assert_eq!(cfg.temperature, vec![1.0; 3]);
+        assert_eq!(cfg.n_act(), 1);
+    }
+
+    fn write(dir: &Path, v: serde_json::Value) -> PathBuf {
+        let p = dir.join("config.json");
+        std::fs::write(&p, v.to_string()).unwrap();
+        p
+    }
+
+    fn shape() -> serde_json::Value {
+        json!({
+            "model_type": "modernbert", "vocab_size": 100, "hidden_size": 16,
+            "num_hidden_layers": 2, "num_attention_heads": 2, "intermediate_size": 32,
+            "max_position_embeddings": 64,
+        })
+    }
+
+    #[test]
+    fn rope_bases_are_read_from_either_layout() {
+        let dir = scratch_dir("enc-rope");
+
+        let mut nested = shape();
+        nested["rope_parameters"] = json!({
+            "full_attention": {"rope_theta": 123.0},
+            "sliding_attention": {"rope_theta": 45.0},
+        });
+        let cfg = load_encoder_config(&write(&dir, nested)).unwrap();
+        assert_eq!((cfg.global_rope_theta, cfg.local_rope_theta), (123.0, 45.0));
+
+        let mut flat = shape();
+        flat["global_rope_theta"] = json!(7.0);
+        let cfg = load_encoder_config(&write(&dir, flat)).unwrap();
+        assert_eq!((cfg.global_rope_theta, cfg.local_rope_theta), (7.0, 10_000.0));
+        assert_eq!(
+            (cfg.hidden_size, cfg.local_attention, cfg.global_attn_every_n_layers),
+            (16, 128, 3)
+        );
+    }
+
+    #[test]
+    fn other_architectures_and_missing_shape_keys_are_rejected() {
+        let dir = scratch_dir("enc-bad");
+
+        let mut bert = shape();
+        bert["model_type"] = json!("bert");
+        let err = load_encoder_config(&write(&dir, bert)).unwrap_err();
+        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("unsupported")), "{err}");
+
+        let mut headless = shape();
+        headless.as_object_mut().unwrap().remove("hidden_size");
+        let err = load_encoder_config(&write(&dir, headless)).unwrap_err();
+        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("hidden_size")), "{err}");
+    }
 }

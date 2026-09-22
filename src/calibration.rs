@@ -28,8 +28,12 @@ pub enum OptionBucket {
 }
 
 impl OptionBucket {
-    pub const ALL: [OptionBucket; 4] =
-        [OptionBucket::Two, OptionBucket::ThreeToFive, OptionBucket::SixToTen, OptionBucket::ElevenPlus];
+    pub const ALL: [OptionBucket; 4] = [
+        OptionBucket::Two,
+        OptionBucket::ThreeToFive,
+        OptionBucket::SixToTen,
+        OptionBucket::ElevenPlus,
+    ];
 
     /// The bucket a question with `k` options falls into.
     pub fn from_count(k: usize) -> Self {
@@ -87,7 +91,8 @@ impl Calibration {
         let mut table = [[1.0f32; OptionBucket::ALL.len()]; QType::ALL.len()];
         for kind in QType::ALL {
             if let Some(&t) = cfg.temperature.get(kind.index()) {
-                table[kind.index()] = [clamp(format!("temperature[{}]", kind.index()), t); OptionBucket::ALL.len()];
+                table[kind.index()] =
+                    [clamp(format!("temperature[{}]", kind.index()), t); OptionBucket::ALL.len()];
             }
         }
         for (key, &t) in &cfg.temperature_by_options {

@@ -1,0 +1,3 @@
+# The crate is written compactly: a short `if a { x } else { y }` or a one-argument call stays on
+# one line as long as it fits in the default 100 columns.
+use_small_heuristics = "Max"

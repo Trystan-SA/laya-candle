@@ -45,7 +45,10 @@ fn questions() -> Questions {
 fn answers_have_the_shape_the_questions_asked_for() {
     let agent = agent();
     let out = agent
-        .predict(json!({"body": "We were billed twice for March. Please refund the duplicate."}), &questions())
+        .predict(
+            json!({"body": "We were billed twice for March. Please refund the duplicate."}),
+            &questions(),
+        )
         .unwrap();
 
     assert_eq!(out.answers.len(), 4);

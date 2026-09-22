@@ -18,12 +18,7 @@ pub struct Action {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
     /// The picked label, with a probability for every option.
-    Choice {
-        choice: String,
-        probabilities: IndexMap<String, f32>,
-        confidence: f32,
-        action: Action,
-    },
+    Choice { choice: String, probabilities: IndexMap<String, f32>, confidence: f32, action: Action },
     /// The expected level, with the level descriptions it was scored against.
     Score {
         score: f32,
@@ -141,5 +136,66 @@ impl Prediction {
     /// Pretty-printed JSON, in the same shape the Python package returns.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("a Prediction always serialises")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn action() -> Action {
+        Action { act_probability: 1.0 }
+    }
+
+    fn noul(p: f32) -> Answer {
+        Answer::Noul { noul: p, confidence: p.max(1.0 - p), action: action() }
+    }
+
+    #[test]
+    fn probabilities_are_read_by_label_for_every_primitive() {
+        let choice = Answer::Choice {
+            choice: "a".into(),
+            probabilities: [("a".to_string(), 0.75), ("b".to_string(), 0.25)].into_iter().collect(),
+            confidence: 0.5,
+            action: action(),
+        };
+        assert_eq!(choice.as_choice(), Some("a"));
+        assert_eq!(choice.probability("b"), Some(0.25));
+        assert_eq!(choice.probability("zzz"), None);
+
+        let n = noul(0.75);
+        assert_eq!(n.as_noul(), Some(0.75));
+        assert_eq!(n.as_choice(), None);
+        assert_eq!(n.probability("true"), Some(0.75));
+        assert_eq!(n.probability("false"), Some(0.25));
+        assert_eq!(n.probability("maybe"), None);
+    }
+
+    #[test]
+    fn below_confidence_lists_the_weak_answers_in_question_order() {
+        let answers: IndexMap<String, Answer> =
+            [("sure", noul(0.99)), ("meh", noul(0.55)), ("coin", noul(0.5))]
+                .into_iter()
+                .map(|(id, a)| (id.to_string(), a))
+                .collect();
+        let p = Prediction {
+            model: "test".into(),
+            answers,
+            usage: Usage { input_tokens: 1, output_tokens: 0 },
+            routing: None,
+        };
+        assert_eq!(p.below_confidence(0.9), vec!["meh", "coin"]);
+        assert_eq!(p.get("sure").map(Answer::confidence), Some(0.99));
+        assert!(p.get("nope").is_none());
+    }
+
+    #[test]
+    fn json_carries_the_primitive_as_a_type_tag() {
+        let v = serde_json::to_value(noul(0.75)).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "noul", "noul": 0.75, "confidence": 0.75, "action": {"act_probability": 1.0}})
+        );
     }
 }

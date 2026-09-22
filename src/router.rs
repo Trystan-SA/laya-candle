@@ -108,8 +108,14 @@ fn default_models() -> Specs {
 const TYPED_DECISION_WORKFLOWS: &[(&str, &[&str])] = &[
     ("agent_trace_observability", &["action", "needs_review", "outcome", "risk", "urgency"]),
     ("customer_service", &["action", "category", "churn_risk", "needs_human", "urgency"]),
-    ("invoice_processing", &["discrepancy_severity", "disposition", "duplicate", "matches_order", "urgency"]),
-    ("security_incidents", &["credential_compromise", "disposition", "severity", "true_positive", "urgency"]),
+    (
+        "invoice_processing",
+        &["discrepancy_severity", "disposition", "duplicate", "matches_order", "urgency"],
+    ),
+    (
+        "security_incidents",
+        &["credential_compromise", "disposition", "severity", "true_positive", "urgency"],
+    ),
 ];
 
 /// Name of the typed-decisions workflow these question ids are, if any.
@@ -344,13 +350,14 @@ impl Router {
         questions: &Questions,
         opts: &RouteOptions,
     ) -> Result<RouteDecision> {
-        let decide = |model: ModelName, reason: String, detection, workflow: Option<&str>| RouteDecision {
-            model,
-            repo: self.spec(model).label(),
-            reason,
-            detection,
-            workflow: workflow.map(str::to_string),
-        };
+        let decide =
+            |model: ModelName, reason: String, detection, workflow: Option<&str>| RouteDecision {
+                model,
+                repo: self.spec(model).label(),
+                reason,
+                detection,
+                workflow: workflow.map(str::to_string),
+            };
 
         // `task` is an older spelling of `model`; both name a checkpoint.
         let forced = opts.model.as_deref().map(|m| ("model", m));
@@ -360,7 +367,7 @@ impl Router {
         }
 
         let workflow = match_typed_decisions_workflow(questions);
-        if self.auto_task_detection && let Some(wf) = workflow {
+        if let Some(wf) = workflow.filter(|_| self.auto_task_detection) {
             return Ok(decide(
                 ModelName::TypedDecisions,
                 format!("question ids match the {wf:?} typed-decisions workflow"),
@@ -382,7 +389,10 @@ impl Router {
 
         let det = analyse(state);
         let (model, reason) = if det.script == "unknown" {
-            (self.default, format!("no letters detected in state; using default ({})", self.default))
+            (
+                self.default,
+                format!("no letters detected in state; using default ({})", self.default),
+            )
         } else if det.script != "latin" {
             (
                 ModelName::Multilingual,
@@ -476,7 +486,11 @@ mod tests {
     #[test]
     fn english_goes_to_the_english_checkpoint() {
         let d = router()
-            .route(&json!("We were billed twice and would like a refund"), &questions(), &Default::default())
+            .route(
+                &json!("We were billed twice and would like a refund"),
+                &questions(),
+                &Default::default(),
+            )
             .unwrap();
         assert_eq!(d.model, ModelName::English);
     }
@@ -526,5 +540,57 @@ mod tests {
         assert_eq!(ModelName::parse("EN").unwrap(), ModelName::English);
         assert_eq!(ModelName::parse("typed_decisions").unwrap(), ModelName::TypedDecisions);
         assert!(ModelName::parse("gpt").is_err());
+    }
+
+    #[test]
+    fn an_explicit_lang_picks_the_checkpoint_without_detection() {
+        let en = router().route(&json!("मुझसे"), &questions(), &RouteOptions::lang("en-US")).unwrap();
+        assert_eq!(en.model, ModelName::English);
+        assert!(en.detection.is_none());
+
+        let de =
+            router().route(&json!("hello there"), &questions(), &RouteOptions::lang("de")).unwrap();
+        assert_eq!(de.model, ModelName::Multilingual);
+        assert!(de.reason.contains("lang=\"de\""), "{}", de.reason);
+    }
+
+    #[test]
+    fn task_is_an_alias_for_model() {
+        let d = router()
+            .route(&json!("x"), &questions(), &RouteOptions::task("typed_decisions"))
+            .unwrap();
+        assert_eq!(d.model, ModelName::TypedDecisions);
+        assert!(d.reason.starts_with("explicit task="), "{}", d.reason);
+        assert!(router().route(&json!("x"), &questions(), &RouteOptions::model("gpt")).is_err());
+    }
+
+    #[test]
+    fn a_letterless_state_goes_to_the_configured_default() {
+        let r = RouterBuilder::new().default_model(ModelName::Multilingual).build().unwrap();
+        let d = r.route(&json!({"amount": 4411}), &questions(), &Default::default()).unwrap();
+        assert_eq!(d.model, ModelName::Multilingual);
+        assert!(d.reason.contains("no letters"), "{}", d.reason);
+    }
+
+    #[test]
+    fn decisions_name_where_the_checkpoint_comes_from() {
+        let r = RouterBuilder::new()
+            .model(ModelName::English, ModelSpec::Dir("/opt/laya".into()))
+            .build()
+            .unwrap();
+        let d = r.route(&json!("hello there friend"), &questions(), &Default::default()).unwrap();
+        assert_eq!(d.repo, "/opt/laya");
+
+        let d = r.route(&json!("मुझसे"), &questions(), &Default::default()).unwrap();
+        assert_eq!(d.repo, format!("{BUNDLE_REPO}/multilingual"));
+    }
+
+    #[test]
+    fn nothing_is_resident_until_a_load_is_asked_for() {
+        let r = router();
+        assert!(r.loaded().is_empty());
+        r.unload(None);
+        r.unload(Some(ModelName::English));
+        assert!(r.loaded().is_empty());
     }
 }

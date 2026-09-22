@@ -7,9 +7,11 @@
 //! is detected exactly; the Latin-script language guess is a stopword and diacritic heuristic and
 //! is explicitly best effort.
 
+use std::collections::BTreeMap;
+
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 use crate::calibration::round4;
 
@@ -106,10 +108,9 @@ pub struct Detection {
     pub script_profile: BTreeMap<String, f32>,
     /// Best-effort language code for Latin text; `None` when undecided.
     pub language: Option<String>,
-    /// Whether the English checkpoint can be expected to read this state.
+    /// Whether the English checkpoint can be expected to read this state. An unnamed language
+    /// is *not* English by default: see [`analyse`].
     pub is_english: bool,
-    /// True when no language could be named — which is *not* the same as English.
-    pub language_undecided: bool,
     /// Share of characters that are non-English letters.
     pub diacritic_rate: f32,
     /// Share of alphabetic characters outside the Latin script.
@@ -127,15 +128,13 @@ fn script_of(c: char) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
-/// Count alphabetic characters per script, keeping first-seen order for tie-breaking.
-fn script_counts(text: &str) -> Vec<(&'static str, usize)> {
-    let mut counts: Vec<(&'static str, usize)> = Vec::new();
-    for c in text.chars().filter(|c| c.is_alphabetic()) {
-        let Some(name) = script_of(c) else { continue };
-        match counts.iter_mut().find(|(n, _)| *n == name) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((name, 1)),
-        }
+/// Alphabetic characters per script, in first-seen order for tie-breaking.
+type ScriptCounts = IndexMap<&'static str, usize>;
+
+fn script_counts(text: &str) -> ScriptCounts {
+    let mut counts = ScriptCounts::new();
+    for name in text.chars().filter(|c| c.is_alphabetic()).filter_map(script_of) {
+        *counts.entry(name).or_insert(0) += 1;
     }
     counts
 }
@@ -174,7 +173,7 @@ fn text_leaves(state: &Value, depth: usize, out: &mut String) {
 }
 
 /// Flatten a state into the text detection reads.
-pub fn state_text(state: &Value) -> String {
+fn state_text(state: &Value) -> String {
     let mut text = String::new();
     text_leaves(state, 0, &mut text);
     if let Some((cut, _)) = text.char_indices().nth(MAX_DETECTION_CHARS) {
@@ -183,15 +182,16 @@ pub fn state_text(state: &Value) -> String {
     text
 }
 
-fn dominant_script(counts: &[(&'static str, usize)]) -> &'static str {
-    first_max(counts.iter().copied()).map_or("unknown", |(name, _)| name)
+fn dominant_script(counts: &ScriptCounts) -> &'static str {
+    first_max(counts.iter().map(|(name, n)| (*name, *n))).map_or("unknown", |(name, _)| name)
 }
 
-fn profile_of(counts: &[(&'static str, usize)]) -> BTreeMap<String, f32> {
-    let total: usize = counts.iter().map(|(_, n)| *n).sum();
+/// Fraction of alphabetic characters belonging to each detected script.
+fn profile_of(counts: &ScriptCounts) -> BTreeMap<String, f32> {
+    let total: usize = counts.values().sum();
     counts
         .iter()
-        .map(|&(name, n)| (name.to_string(), n as f32 / total as f32))
+        .map(|(name, n)| (name.to_string(), *n as f32 / total as f32))
         .collect()
 }
 
@@ -200,37 +200,26 @@ pub fn detect_script(text: &str) -> String {
     dominant_script(&script_counts(text)).to_string()
 }
 
-/// Fraction of alphabetic characters belonging to each detected script.
-pub fn script_profile(text: &str) -> BTreeMap<String, f32> {
-    profile_of(&script_counts(text))
-}
-
 struct LatinProfile {
     language: Option<String>,
     diacritic_rate: f32,
     looks_non_english: bool,
 }
 
-fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphabetic())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
 fn latin_profile(text: &str) -> LatinProfile {
-    let ws = words(text);
     let lowered = text.to_lowercase();
     let n_chars = lowered.chars().count();
-    let diac = lowered.chars().filter(|c| NON_EN_DIACRITICS.contains(*c)).count();
+    // Every non-English letter is non-ASCII, so plain English pays nothing for this scan.
+    let diac = lowered.chars().filter(|c| !c.is_ascii() && NON_EN_DIACRITICS.contains(*c)).count();
     let diacritic_rate = diac as f32 / n_chars.max(1) as f32;
     let looks_non_english = diacritic_rate >= NON_EN_DIACRITIC_RATE;
 
+    let ws: Vec<&str> = lowered.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).collect();
     if ws.len() < 4 {
         return LatinProfile { language: None, diacritic_rate, looks_non_english };
     }
 
-    let hits = |list: &[&str]| ws.iter().filter(|w| list.contains(&w.as_str())).count();
+    let hits = |list: &[&str]| ws.iter().filter(|w| list.contains(w)).count();
     let en = hits(EN_STOPWORDS);
     // No stopword hit for any non-English language is no evidence for a *particular* one.
     // Naming the winner of a 0-0 tie invented a language, so stay undecided and let the
@@ -282,17 +271,11 @@ pub fn analyse(state: &Value) -> Detection {
     Detection {
         script: script.to_string(),
         script_profile: profile,
-        language_undecided: language.is_none(),
         language,
         is_english,
         diacritic_rate: latin.as_ref().map_or(0.0, |l| round4(l.diacritic_rate)),
         non_latin_fraction,
     }
-}
-
-/// True when the English checkpoint can be expected to read this state.
-pub fn is_english(state: &Value) -> bool {
-    analyse(state).is_english
 }
 
 #[cfg(test)]

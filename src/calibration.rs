@@ -52,12 +52,8 @@ impl OptionBucket {
     }
 }
 
-/// The calibration bucket a question falls into: `"<type>:<option-count>"`.
-pub fn temp_bucket(kind: QType, k: usize) -> String {
-    format!("{}:{}", kind.name(), OptionBucket::from_count(k).name())
-}
-
-/// The reverse of [`temp_bucket`]; `None` for a key this crate does not know.
+/// Read a `temperature_by_options` key, `"<type>:<bucket>"`; `None` for one this crate does
+/// not know.
 fn parse_bucket(key: &str) -> Option<(QType, OptionBucket)> {
     let (kind, bucket) = key.split_once(':')?;
     let kind = QType::ALL.into_iter().find(|q| q.name() == kind)?;
@@ -153,11 +149,12 @@ mod tests {
 
     #[test]
     fn buckets_match_the_reference_names() {
-        assert_eq!(temp_bucket(QType::Noul, 2), "noul:2");
-        assert_eq!(temp_bucket(QType::Choice, 4), "choice:3-5");
-        assert_eq!(temp_bucket(QType::Choice, 7), "choice:6-10");
-        assert_eq!(temp_bucket(QType::Choice, 20), "choice:11+");
-        assert_eq!(temp_bucket(QType::Score, 3), "score:3-5");
+        assert_eq!(OptionBucket::from_count(2).name(), "2");
+        assert_eq!(OptionBucket::from_count(4).name(), "3-5");
+        assert_eq!(OptionBucket::from_count(7).name(), "6-10");
+        assert_eq!(OptionBucket::from_count(20).name(), "11+");
+        assert_eq!(parse_bucket("score:3-5"), Some((QType::Score, OptionBucket::ThreeToFive)));
+        assert_eq!(parse_bucket("bogus:9"), None);
     }
 
     #[test]

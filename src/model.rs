@@ -6,7 +6,7 @@
 
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::ops::softmax_last_dim;
-use candle_nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder};
+use candle_nn::{Embedding, LayerNorm, Linear, Module, VarBuilder};
 use candle_transformers::models::modernbert;
 
 use crate::error::Result;
@@ -19,20 +19,13 @@ use crate::question::QType;
 /// implementation falls back to on CPU and MPS.
 pub(crate) const DTYPE: DType = DType::F32;
 
-/// `nn.TransformerEncoderLayer` keeps this eps, and so must we.
+/// `nn.TransformerEncoderLayer` keeps this eps, and so must we. A bare eps is an affine,
+/// mean-removing `LayerNormConfig`, which is what PyTorch's `LayerNorm` is.
 const HEAD_LN_EPS: f64 = 1e-5;
 /// Pad positions are pushed this far below the real scores before the softmax.
 const MASKED_SCORE: f64 = -1e9;
 /// Markers that do not exist for a given question are scored this low, as in the reference.
 const MASKED_OPTION_LOGIT: f32 = -1e4;
-
-fn layer_norm(size: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    Ok(candle_nn::layer_norm(
-        size,
-        LayerNormConfig { eps: HEAD_LN_EPS, remove_mean: true, affine: true },
-        vb,
-    )?)
-}
 
 /// `nn.MultiheadAttention` with the packed `in_proj_weight` PyTorch stores.
 struct MultiheadAttention {
@@ -92,8 +85,8 @@ impl HeadLayer {
             self_attn: MultiheadAttention::load(vb.pp("self_attn"), hidden, n_heads)?,
             linear1: candle_nn::linear(hidden, ff, vb.pp("linear1"))?,
             linear2: candle_nn::linear(ff, hidden, vb.pp("linear2"))?,
-            norm1: layer_norm(hidden, vb.pp("norm1"))?,
-            norm2: layer_norm(hidden, vb.pp("norm2"))?,
+            norm1: candle_nn::layer_norm(hidden, HEAD_LN_EPS, vb.pp("norm1"))?,
+            norm2: candle_nn::layer_norm(hidden, HEAD_LN_EPS, vb.pp("norm2"))?,
         })
     }
 
@@ -162,7 +155,7 @@ impl DecisionModel {
             encoder,
             head,
             type_emb: candle_nn::embedding(QType::ALL.len(), hidden, vb.pp("type_emb"))?,
-            scorer_norm: layer_norm(hidden, vb.pp("scorer.0"))?,
+            scorer_norm: candle_nn::layer_norm(hidden, HEAD_LN_EPS, vb.pp("scorer.0"))?,
             scorer_fc1: candle_nn::linear(hidden, hidden, vb.pp("scorer.1"))?,
             scorer_fc2: candle_nn::linear(hidden, 1, vb.pp("scorer.3"))?,
             act_fc1: candle_nn::linear(hidden + 4, 256, vb.pp("act_head.0"))?,

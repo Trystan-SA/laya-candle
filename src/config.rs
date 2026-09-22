@@ -7,60 +7,48 @@ use candle_transformers::models::modernbert;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::calibration::Calibration;
 use crate::error::{Error, Result, read_json};
+use crate::question::QType;
 
 /// The decision-model side of a checkpoint, as stored in `rl_agent_config.json`.
+///
+/// Every field falls back to its [`Default`] when the file leaves it out.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentConfig {
     /// Hub id of the backbone the checkpoint was trained on, for provenance only.
-    #[serde(default)]
     pub encoder: String,
-    #[serde(default = "default_head_layers")]
     pub head_layers: usize,
     /// Total sequence budget, including the question head and the state.
-    #[serde(default = "default_max_len")]
     pub max_len: usize,
     /// Token budget for the question head (instructions plus every option).
-    #[serde(default = "default_head_max_len")]
     pub head_max_len: usize,
     /// Named actions the auxiliary head can recommend; its output width is `len + 1`.
-    #[serde(default)]
     pub act_costs: HashMap<String, f64>,
-    /// Per-type calibration temperature, indexed by [`crate::QType::index`].
-    #[serde(default = "default_temperature")]
+    /// Per-type calibration temperature, indexed by [`QType::index`].
     pub temperature: Vec<f32>,
     /// Finer calibration, keyed by `"<type>:<option-count bucket>"`.
-    #[serde(default)]
     pub temperature_by_options: HashMap<String, f32>,
 }
 
-fn default_head_layers() -> usize {
-    2
-}
-fn default_max_len() -> usize {
-    512
-}
-fn default_head_max_len() -> usize {
-    192
-}
-fn default_temperature() -> Vec<f32> {
-    vec![1.0, 1.0, 1.0]
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            encoder: String::new(),
+            head_layers: 2,
+            max_len: 512,
+            head_max_len: 192,
+            act_costs: HashMap::new(),
+            temperature: vec![1.0; QType::ALL.len()],
+            temperature_by_options: HashMap::new(),
+        }
+    }
 }
 
 impl AgentConfig {
-    pub fn from_file(path: &Path) -> Result<Self> {
-        read_json(path)
-    }
-
     /// Width of the auxiliary action head.
     pub fn n_act(&self) -> usize {
         self.act_costs.len() + 1
-    }
-
-    /// The temperatures actually applied, clamped into a range that cannot fake confidence.
-    pub fn calibration(&self) -> Calibration {
-        Calibration::from_config(self)
     }
 }
 
@@ -80,6 +68,7 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
         )));
     }
 
+    let u64_or = |key: &str, fallback: u64| v.get(key).and_then(Value::as_u64).unwrap_or(fallback);
     let usize_at = |key: &str| -> Result<usize> {
         v.get(key)
             .and_then(Value::as_u64)
@@ -108,13 +97,10 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
             .or_else(|| v.get("norm_eps"))
             .and_then(Value::as_f64)
             .unwrap_or(1e-5),
-        pad_token_id: v.get("pad_token_id").and_then(Value::as_u64).unwrap_or(0) as u32,
-        global_attn_every_n_layers: v
-            .get("global_attn_every_n_layers")
-            .and_then(Value::as_u64)
-            .unwrap_or(3) as usize,
+        pad_token_id: u64_or("pad_token_id", 0) as u32,
+        global_attn_every_n_layers: u64_or("global_attn_every_n_layers", 3) as usize,
         global_rope_theta: rope("full_attention", "global_rope_theta", 160_000.0),
-        local_attention: v.get("local_attention").and_then(Value::as_u64).unwrap_or(128) as usize,
+        local_attention: u64_or("local_attention", 128) as usize,
         local_rope_theta: rope("sliding_attention", "local_rope_theta", 10_000.0),
         classifier_config: None,
     })

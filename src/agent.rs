@@ -11,7 +11,7 @@ use crate::answer::{Action, Answer, Prediction, Usage};
 use crate::calibration::{Calibration, confidence_from_probs, round4, softmax};
 use crate::checkpoint::Checkpoint;
 use crate::config::{AgentConfig, load_encoder_config};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, read_json};
 use crate::model::DecisionModel;
 use crate::pyjson;
 use crate::question::{QType, Questions};
@@ -68,7 +68,7 @@ impl Agent {
 
     /// Load a resolved checkpoint onto a specific device.
     pub fn load(cp: &Checkpoint, device: &Device) -> Result<Self> {
-        let config = AgentConfig::from_file(&cp.agent_config)?;
+        let config: AgentConfig = read_json(&cp.agent_config)?;
         let enc_cfg = load_encoder_config(&cp.encoder_config)?;
         let (tokenizer, special) =
             crate::tokenizer::load(&cp.tokenizer, cp.tokenizer_config.as_deref())?;
@@ -86,7 +86,7 @@ impl Agent {
             device,
         )?;
 
-        let calibration = config.calibration();
+        let calibration = Calibration::from_config(&config);
         if !calibration.clamped.is_empty() {
             eprintln!(
                 "[laya] {}: this checkpoint ships temperatures outside [{}, {}] which would \
@@ -168,7 +168,8 @@ impl Agent {
 
         let mut answers = IndexMap::with_capacity(questions.len());
         for (row, (id, q)) in questions.iter().enumerate() {
-            let k = items[row].markers.len();
+            let item = &items[row];
+            let k = item.markers.len();
             let scale = self.calibration.temperature(q.kind, k);
 
             let z: Vec<f32> = out.logits[row][..k].iter().map(|v| v / scale).collect();
@@ -176,31 +177,25 @@ impl Agent {
             let confidence = round4(confidence_from_probs(&p, k));
             let action = Action { act_probability: round4(out.act_probs[row][0]) };
 
-            // Building the sequence already validated the criteria, so the lookups below cannot
-            // fail for a question that got this far.
             let answer = match q.kind {
                 QType::Choice => {
-                    let probabilities = distribution(q.labels(id)?, &p);
-                    let best = p
+                    let choice = item
+                        .labels
                         .iter()
-                        .enumerate()
+                        .zip(&p)
                         .max_by(|a, b| a.1.total_cmp(b.1))
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    let choice = probabilities
-                        .get_index(best)
                         .map(|(label, _)| label.clone())
-                        .expect("one probability per option");
-                    Answer::Choice { choice, probabilities, confidence, action }
+                        .expect("a choice has at least one option");
+                    Answer::Choice { choice, probabilities: distribution(&item.labels, &p), confidence, action }
                 }
                 QType::Score => {
-                    let labels = q.labels(id)?;
-                    let levels = q.score_levels(id)?;
                     let score = p.iter().enumerate().map(|(i, v)| i as f32 * v).sum::<f32>();
+                    // Building the sequence already validated the levels, so this cannot fail here.
+                    let levels = q.score_levels(id)?;
                     Answer::Score {
                         score: round4(score),
-                        legend: labels.iter().cloned().zip(levels.iter().cloned()).collect(),
-                        probabilities: distribution(labels, &p),
+                        legend: item.labels.iter().cloned().zip(levels.iter().cloned()).collect(),
+                        probabilities: distribution(&item.labels, &p),
                         confidence,
                         action,
                     }
@@ -227,8 +222,8 @@ impl Agent {
 }
 
 /// One rounded probability per label, in marker order.
-fn distribution(labels: Vec<String>, p: &[f32]) -> IndexMap<String, f32> {
-    labels.into_iter().zip(p.iter().map(|v| round4(*v))).collect()
+fn distribution(labels: &[String], p: &[f32]) -> IndexMap<String, f32> {
+    labels.iter().cloned().zip(p.iter().map(|v| round4(*v))).collect()
 }
 
 /// Fail early, and say what is actually wrong, when a file is not a decision checkpoint.

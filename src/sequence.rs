@@ -21,6 +21,10 @@ use crate::tokenizer::SpecialTokens;
 const MAX_OPTION_TOKENS: usize = 48;
 /// The question head never shrinks below this many instruction tokens.
 const MIN_HEAD_TOKENS: usize = 8;
+/// The state text is cut at this many bytes per sequence slot before it is tokenised. No BPE
+/// token in these vocabularies comes anywhere near this long, so every token that could still
+/// fit in the sequence lies inside the kept prefix; the rest would be tokenised and dropped.
+const MAX_STATE_BYTES_PER_TOKEN: usize = 64;
 
 /// One question, encoded and ready to be batched.
 #[derive(Clone, Debug)]
@@ -28,6 +32,8 @@ pub(crate) struct Item {
     pub ids: Vec<u32>,
     pub markers: Vec<usize>,
     pub qtype: QType,
+    /// One label per marker, in marker order.
+    pub labels: Vec<String>,
 }
 
 /// Turns questions and states into sequences that fit a checkpoint's budget.
@@ -56,30 +62,32 @@ impl Encoder {
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>> {
-        Ok(self.tok.encode(text, false)?.get_ids().to_vec())
+        // Only the ids are read, so the offsets `encode` would also compute are skipped.
+        Ok(self.tok.encode_fast(text, false)?.get_ids().to_vec())
     }
 
     /// Encode the flattened state once; every question in a batch shares it.
     pub(crate) fn encode_state(&self, state: &str) -> Result<Vec<u32>> {
-        self.encode(&self.scrub(state))
+        let mut cut = state.len().min(self.max_len * MAX_STATE_BYTES_PER_TOKEN);
+        while !state.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.encode(&self.scrub(&state[..cut]))
     }
 
     /// Encode one question over an already-encoded state.
     ///
     /// A state that does not fit is cut at the end.
     pub(crate) fn build(&self, state_ids: &[u32], id: &str, q: &Question) -> Result<Item> {
-        let options = q.render_options(id)?;
-        let n_options = options.len();
-        if n_options == 0 {
-            return Err(Error::question(id, "has no options to score"));
-        }
+        let (labels, texts): (Vec<String>, Vec<String>) = q.options(id)?.into_iter().unzip();
+        let n_options = texts.len();
 
         let head_text = format!("{} question: {}", q.kind.name(), self.scrub(&q.instructions_text()));
         let mut head_ids = self.encode(&head_text)?;
 
         let mut opt_ids: Vec<Vec<u32>> = Vec::with_capacity(n_options);
-        for opt in &options {
-            let mut body = self.encode(&format!(" {}", self.scrub(opt)))?;
+        for text in &texts {
+            let mut body = self.encode(&format!(" {}", self.scrub(text)))?;
             body.truncate(MAX_OPTION_TOKENS);
             let mut ids = Vec::with_capacity(body.len() + 1);
             ids.push(self.sp.mask_id);
@@ -114,13 +122,8 @@ impl Encoder {
         }
         ids.push(self.sp.sep_id);
 
-        let room = self.max_len.saturating_sub(ids.len() + 1);
-        ids.extend_from_slice(&state_ids[..state_ids.len().min(room)]);
-        ids.push(self.sp.sep_id);
-        ids.truncate(self.max_len);
-
-        markers.retain(|&m| m < self.max_len);
-        if markers.len() != n_options {
+        // Markers grow with the sequence, so the last one is the first to fall off the end.
+        if markers.last().is_some_and(|&m| m >= self.max_len) {
             return Err(Error::question(
                 id,
                 format!(
@@ -130,7 +133,12 @@ impl Encoder {
             ));
         }
 
-        Ok(Item { ids, markers, qtype: q.kind })
+        let room = self.max_len.saturating_sub(ids.len() + 1);
+        ids.extend_from_slice(&state_ids[..state_ids.len().min(room)]);
+        ids.push(self.sp.sep_id);
+        ids.truncate(self.max_len);
+
+        Ok(Item { ids, markers, qtype: q.kind, labels })
     }
 
     /// Pad a batch of encoded questions into rectangular tensors' worth of data.

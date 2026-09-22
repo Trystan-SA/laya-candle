@@ -176,26 +176,24 @@ pub fn model_router() -> Questions {
         )
 }
 
-/// Every preset, under the name [`by_name`] knows it by.
-const PRESETS: [(&str, fn() -> Questions); 5] = [
-    ("triage", triage),
-    ("email", || email(None)),
-    ("guard", guard),
-    ("moderation", moderation),
-    ("router", model_router),
+/// Every preset: the names it answers to (the first one is listed) and how to build it.
+const PRESETS: [(&[&str], fn() -> Questions); 5] = [
+    (&["triage"], triage),
+    (&["email"], || email(None)),
+    (&["guard"], guard),
+    (&["moderation"], moderation),
+    (&["router", "model_router"], model_router),
 ];
 
 /// Look a preset up by name, for a CLI or a config file.
 pub fn by_name(name: &str) -> Option<Questions> {
     let key = name.trim().to_lowercase().replace('-', "_");
-    // The function is `model_router`; the listing calls it `router`. Both resolve.
-    let key = if key == "model_router" { "router" } else { key.as_str() };
-    PRESETS.iter().find(|(n, _)| *n == key).map(|(_, make)| make())
+    PRESETS.iter().find(|(names, _)| names.contains(&key.as_str())).map(|(_, make)| make())
 }
 
-/// Every preset name [`by_name`] accepts, in listing order.
+/// Every preset name [`by_name`] lists, in listing order.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    PRESETS.iter().map(|(n, _)| *n)
+    PRESETS.iter().map(|(names, _)| names[0])
 }
 
 #[cfg(test)]

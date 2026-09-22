@@ -29,7 +29,7 @@ const TOKENIZER: &str = "tokenizer/tokenizer.json";
 const TOKENIZER_CONFIG: &str = "tokenizer/tokenizer_config.json";
 
 /// The files a checkpoint is made of, relative to its root.
-pub(crate) const FILES: [&str; 5] = [AGENT_CONFIG, WEIGHTS, ENCODER_CONFIG, TOKENIZER, TOKENIZER_CONFIG];
+const FILES: [&str; 5] = [AGENT_CONFIG, WEIGHTS, ENCODER_CONFIG, TOKENIZER, TOKENIZER_CONFIG];
 
 /// How a Hub checkpoint names itself: the repository, plus the subfolder when it has one.
 pub(crate) fn hub_label(repo: &str, subfolder: Option<&str>) -> String {

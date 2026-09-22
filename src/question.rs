@@ -77,7 +77,7 @@ impl Question {
 
     /// The instruction text as the model sees it: strings pass through, anything else is JSON.
     pub fn instructions_text(&self) -> String {
-        pyjson::render(&self.instructions)
+        pyjson::render(&self.instructions).into_owned()
     }
 
     /// The labels an answer can carry, in marker order.
@@ -85,39 +85,46 @@ impl Question {
     /// `choice` returns its criterion keys, `score` the level indices as strings and `noul`
     /// `["false", "true"]`.
     pub fn labels(&self, id: &str) -> Result<Vec<String>> {
-        match self.kind {
-            QType::Choice => Ok(self.choice_entries(id)?.into_iter().map(|(k, _)| k).collect()),
-            QType::Score => Ok((0..self.score_levels(id)?.len()).map(|i| i.to_string()).collect()),
-            QType::Noul => Ok(vec!["false".to_string(), "true".to_string()]),
-        }
+        Ok(self.options(id)?.into_iter().map(|(label, _)| label).collect())
     }
 
     /// The option texts, one per `[MASK]` marker, in label order.
-    ///
-    /// This is a direct port of the reference `render_options`: the exact strings matter,
-    /// because they are tokenised into the sequence the model scores.
     pub fn render_options(&self, id: &str) -> Result<Vec<String>> {
+        Ok(self.options(id)?.into_iter().map(|(_, text)| text).collect())
+    }
+
+    /// Every option as `(label, text)`, in marker order: the one place the criteria are parsed.
+    ///
+    /// The texts are a direct port of the reference `render_options`: the exact strings matter,
+    /// because they are tokenised into the sequence the model scores.
+    pub(crate) fn options(&self, id: &str) -> Result<Vec<(String, String)>> {
         match self.kind {
             QType::Choice => Ok(self
                 .choice_entries(id)?
                 .into_iter()
-                .map(|(k, v)| match v {
-                    // Only null and "" mean "no description": 0 and false are real criteria.
-                    None => k,
-                    Some(v) => format!("{k}: {}", pyjson::render(&v)),
+                .map(|(label, v)| {
+                    let text = match v {
+                        // Only null and "" mean "no description": 0 and false are real criteria.
+                        None => label.clone(),
+                        Some(v) => format!("{label}: {}", pyjson::render(&v)),
+                    };
+                    (label, text)
                 })
                 .collect()),
             QType::Score => Ok(self
                 .score_levels(id)?
                 .iter()
                 .enumerate()
-                .map(|(i, c)| format!("level {i}: {}", pyjson::render(c)))
+                .map(|(i, c)| (i.to_string(), format!("level {i}: {}", pyjson::render(c))))
                 .collect()),
             QType::Noul => {
                 let crit = self.criteria.as_ref().and_then(Value::as_object);
-                let side = |key: &str, fallback: &str| match crit.and_then(|c| c.get(key)) {
-                    Some(v) if !is_blank(v) => format!("{key}: {}", pyjson::render(v)),
-                    _ => format!("{key}: {fallback}"),
+                let side = |key: &str, fallback: &str| {
+                    let text = match crit.and_then(|c| c.get(key)) {
+                        Some(v) if !is_blank(v) => format!("{key}: {}", pyjson::render(v)),
+                        _ => format!("{key}: {fallback}"),
+                    };
+                    (key.to_string(), text)
                 };
                 Ok(vec![
                     side("false", "no, the statement does not hold"),
@@ -128,18 +135,24 @@ impl Question {
     }
 
     fn choice_entries(&self, id: &str) -> Result<Vec<(String, Option<Value>)>> {
-        match self.criteria.as_ref() {
+        let entries: Vec<_> = match self.criteria.as_ref() {
             // A bare list of labels is shorthand for "no description for any of them".
-            Some(Value::Array(items)) => Ok(items.iter().map(|v| (pyjson::render(v), None)).collect()),
-            Some(Value::Object(map)) => Ok(map
+            Some(Value::Array(items)) => {
+                items.iter().map(|v| (pyjson::render(v).into_owned(), None)).collect()
+            }
+            Some(Value::Object(map)) => map
                 .iter()
                 .map(|(k, v)| (k.clone(), if is_blank(v) { None } else { Some(v.clone()) }))
-                .collect()),
-            _ => Err(Error::question(
+                .collect(),
+            _ => Vec::new(),
+        };
+        if entries.is_empty() {
+            return Err(Error::question(
                 id,
-                "a choice question needs `criteria`: either a map of label -> description or a list of labels",
-            )),
+                "a choice question needs `criteria`: a non-empty map of label -> description or list of labels",
+            ));
         }
+        Ok(entries)
     }
 
     /// The ordered level descriptions of a `score` question.

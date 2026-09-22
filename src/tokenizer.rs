@@ -22,9 +22,13 @@ pub struct SpecialTokens {
 ///
 /// The config is optional: the defaults below cover a `tokenizer.json` that stands on its own.
 pub fn load(tok_path: &Path, cfg_path: Option<&Path>) -> Result<(Tokenizer, SpecialTokens)> {
-    let tokenizer = Tokenizer::from_file(tok_path).map_err(|e| {
+    let mut tokenizer = Tokenizer::from_file(tok_path).map_err(|e| {
         Error::Tokenizer(format!("{}: {e}", tok_path.display()))
     })?;
+    // The sequence builder does its own truncation and padding; a `tokenizer.json` that ships
+    // either would otherwise pad every encode to `max_length` for nothing.
+    tokenizer.with_truncation(None)?;
+    tokenizer.with_padding(None);
 
     let cfg: Value = match cfg_path {
         Some(path) => crate::error::read_json(path)?,

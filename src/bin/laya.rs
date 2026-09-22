@@ -1,11 +1,10 @@
 //! `laya` — answer typed questions about a state from the command line.
 
-use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use laya::{Agent, Answer, Prediction, Questions, RouteOptions, Router, presets};
+use laya::{Answer, ModelName, ModelSpec, Prediction, Questions, RouteOptions, Router, presets};
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -82,22 +81,19 @@ fn predict(args: PredictArgs) -> anyhow::Result<()> {
     let state = read_state(&args.state)?;
     let questions = read_questions(&args.questions)?;
 
-    let out = match &args.checkpoint {
-        Some(dir) => {
-            let agent = Agent::from_dir(dir)
-                .with_context(|| format!("loading the checkpoint at {}", dir.display()))?;
-            agent.predict_value(&state, &questions)?
-        }
-        None => {
-            let router = Router::new()?;
-            let opts = RouteOptions {
-                model: args.model.clone(),
-                lang: args.lang.clone(),
-                ..Default::default()
-            };
-            router.predict_with(&state, &questions, &opts)?
-        }
-    };
+    let mut router = Router::builder();
+    let mut opts = RouteOptions { model: args.model.clone(), lang: args.lang.clone(), ..Default::default() };
+    if let Some(dir) = &args.checkpoint {
+        // The directory stands in for whichever checkpoint `--model` names (English by default),
+        // and that checkpoint is forced so routing never looks elsewhere.
+        let name = match &args.model {
+            Some(m) => ModelName::parse(m)?,
+            None => ModelName::English,
+        };
+        router = router.model(name, ModelSpec::Dir(dir.clone()));
+        opts.model = Some(name.as_str().to_string());
+    }
+    let out = router.build()?.predict_with(&state, &questions, &opts)?;
 
     if args.json {
         println!("{}", out.to_json());
@@ -179,9 +175,7 @@ fn read_questions(arg: &str) -> anyhow::Result<Questions> {
 }
 
 fn read_stdin() -> anyhow::Result<String> {
-    let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf).context("reading stdin")?;
-    Ok(buf)
+    std::io::read_to_string(std::io::stdin()).context("reading stdin")
 }
 
 fn print_summary(out: &Prediction) {

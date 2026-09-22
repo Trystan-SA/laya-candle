@@ -6,7 +6,6 @@
 //! stays confident while being wrong, confidence gating cannot save you. Script detection can,
 //! and it costs microseconds before the forward pass.
 
-use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +16,7 @@ use serde_json::Value;
 
 use crate::agent::Agent;
 use crate::answer::Prediction;
-use crate::checkpoint::hub_label;
+use crate::checkpoint::{Checkpoint, hub_label};
 use crate::error::{Error, Result};
 use crate::lang::{Detection, analyse};
 use crate::question::Questions;
@@ -91,18 +90,18 @@ impl ModelSpec {
     }
 }
 
+/// One spec per checkpoint, indexed by `ModelName as usize`. Every checkpoint always has one.
+type Specs = [ModelSpec; ModelName::ALL.len()];
+
 /// The bundle repository: English at the root, every other checkpoint in a subfolder of its name.
-fn default_models() -> HashMap<ModelName, ModelSpec> {
-    ModelName::ALL
-        .into_iter()
-        .map(|name| {
-            let subfolder = (name != ModelName::English).then(|| name.as_str().to_string());
-            (name, ModelSpec::Hub { repo: BUNDLE_REPO.into(), subfolder })
-        })
-        .collect()
+fn default_models() -> Specs {
+    ModelName::ALL.map(|name| ModelSpec::Hub {
+        repo: BUNDLE_REPO.into(),
+        subfolder: (name != ModelName::English).then(|| name.as_str().to_string()),
+    })
 }
 
-/// Question-id signatures of the four typed-decisions workflows.
+/// Question-id signatures of the four typed-decisions workflows, each sorted.
 ///
 /// A match must be exact, so an unrelated schema that happens to contain `urgency` is never
 /// captured.
@@ -115,10 +114,11 @@ const TYPED_DECISION_WORKFLOWS: &[(&str, &[&str])] = &[
 
 /// Name of the typed-decisions workflow these question ids are, if any.
 pub fn match_typed_decisions_workflow(questions: &Questions) -> Option<&'static str> {
+    // Both sides are sorted, so an exact match is an element-wise one.
     let ids = questions.ids();
     TYPED_DECISION_WORKFLOWS
         .iter()
-        .find(|(_, sig)| ids == sig.iter().copied().collect::<BTreeSet<_>>())
+        .find(|(_, sig)| ids.iter().copied().eq(sig.iter().copied()))
         .map(|(name, _)| *name)
 }
 
@@ -190,7 +190,7 @@ impl Loaded {
 /// `max_loaded` of 1 traffic that alternates languages rebuilds a model on *every* request. For
 /// a server, [`preload`](Router::preload) instead.
 pub struct Router {
-    models: HashMap<ModelName, ModelSpec>,
+    models: Specs,
     device: Device,
     default: ModelName,
     auto_task_detection: bool,
@@ -199,7 +199,7 @@ pub struct Router {
 
 /// Builder for a [`Router`].
 pub struct RouterBuilder {
-    models: HashMap<ModelName, ModelSpec>,
+    models: Specs,
     device: Device,
     max_loaded: usize,
     default: ModelName,
@@ -227,7 +227,7 @@ impl RouterBuilder {
 
     /// Point one checkpoint somewhere else — a local directory, or your own Hub repository.
     pub fn model(mut self, name: ModelName, spec: ModelSpec) -> Self {
-        self.models.insert(name, spec);
+        self.models[name as usize] = spec;
         self
     }
 
@@ -286,6 +286,11 @@ impl Router {
         RouterBuilder::new()
     }
 
+    /// Where `name` is loaded from.
+    fn spec(&self, name: ModelName) -> &ModelSpec {
+        &self.models[name as usize]
+    }
+
     /// The checkpoints currently resident, least recently used first.
     pub fn loaded(&self) -> Vec<ModelName> {
         self.loaded.lock().unwrap().agents.keys().copied().collect()
@@ -300,11 +305,7 @@ impl Router {
             return Ok(agent);
         }
 
-        let spec = self
-            .models
-            .get(&name)
-            .ok_or_else(|| Error::UnknownModel(format!("{name} is not configured on this router")))?;
-        let agent = Arc::new(build(spec, &self.device)?);
+        let agent = Arc::new(build(self.spec(name), &self.device)?);
         loaded.insert(name, Arc::clone(&agent));
         Ok(agent)
     }
@@ -343,30 +344,28 @@ impl Router {
         questions: &Questions,
         opts: &RouteOptions,
     ) -> Result<RouteDecision> {
-        let decide = |model: ModelName, reason: String, detection, workflow| RouteDecision {
+        let decide = |model: ModelName, reason: String, detection, workflow: Option<&str>| RouteDecision {
             model,
-            repo: self.models.get(&model).map(ModelSpec::label).unwrap_or_default(),
+            repo: self.spec(model).label(),
             reason,
             detection,
-            workflow,
+            workflow: workflow.map(str::to_string),
         };
 
-        if let Some(name) = &opts.model {
+        // `task` is an older spelling of `model`; both name a checkpoint.
+        let forced = opts.model.as_deref().map(|m| ("model", m));
+        if let Some((what, name)) = forced.or_else(|| opts.task.as_deref().map(|t| ("task", t))) {
             let m = ModelName::parse(name)?;
-            return Ok(decide(m, format!("explicit model={name:?}"), None, None));
-        }
-        if let Some(task) = &opts.task {
-            let m = ModelName::parse(task)?;
-            return Ok(decide(m, format!("explicit task={task:?}"), None, None));
+            return Ok(decide(m, format!("explicit {what}={name:?}"), None, None));
         }
 
-        let workflow = match_typed_decisions_workflow(questions).map(str::to_string);
-        if self.auto_task_detection && let Some(wf) = &workflow {
+        let workflow = match_typed_decisions_workflow(questions);
+        if self.auto_task_detection && let Some(wf) = workflow {
             return Ok(decide(
                 ModelName::TypedDecisions,
                 format!("question ids match the {wf:?} typed-decisions workflow"),
                 None,
-                workflow.clone(),
+                workflow,
             ));
         }
 
@@ -433,21 +432,21 @@ impl Router {
 }
 
 fn build(spec: &ModelSpec, device: &Device) -> Result<Agent> {
-    match spec {
-        ModelSpec::Dir(path) => Agent::load(&crate::checkpoint::Checkpoint::from_dir(path)?, device),
+    let cp = match spec {
+        ModelSpec::Dir(path) => Checkpoint::from_dir(path)?,
         #[cfg(feature = "hub")]
-        ModelSpec::Hub { repo, subfolder } => Agent::from_hub_with(
-            repo,
-            subfolder.as_deref(),
-            &Default::default(),
-            device,
-        ),
+        ModelSpec::Hub { repo, subfolder } => {
+            Checkpoint::from_hub(repo, subfolder.as_deref(), &Default::default())?
+        }
         #[cfg(not(feature = "hub"))]
-        ModelSpec::Hub { repo, .. } => Err(Error::Checkpoint(format!(
-            "{repo} is a Hugging Face Hub repository, but this build has the `hub` feature off. \
-             Enable it, or point the router at a local directory with `ModelSpec::Dir`."
-        ))),
-    }
+        ModelSpec::Hub { repo, .. } => {
+            return Err(Error::Checkpoint(format!(
+                "{repo} is a Hugging Face Hub repository, but this build has the `hub` feature \
+                 off. Enable it, or point the router at a local directory with `ModelSpec::Dir`."
+            )));
+        }
+    };
+    Agent::load(&cp, device)
 }
 
 #[cfg(test)]
@@ -506,6 +505,14 @@ mod tests {
         let on = RouterBuilder::new().auto_task_detection(true).build().unwrap();
         let d = on.route(&json!("hello there friend"), &wf, &Default::default()).unwrap();
         assert_eq!(d.model, ModelName::TypedDecisions);
+    }
+
+    #[test]
+    fn workflow_signatures_are_sorted() {
+        // `match_typed_decisions_workflow` compares element-wise against sorted question ids.
+        for (name, sig) in TYPED_DECISION_WORKFLOWS {
+            assert!(sig.windows(2).all(|w| w[0] < w[1]), "{name}: {sig:?}");
+        }
     }
 
     #[test]

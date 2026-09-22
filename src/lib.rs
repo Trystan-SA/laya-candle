@@ -105,7 +105,7 @@ pub use checkpoint::Checkpoint;
 pub use config::AgentConfig;
 pub use device::default_device;
 pub use error::{Error, Result};
-pub use lang::{Detection, analyse as detect_language, detect_script, is_english};
+pub use lang::{Detection, analyse as detect_language, detect_script};
 pub use question::{QType, Question, Questions};
 pub use router::{ModelName, ModelSpec, RouteDecision, RouteOptions, Router, RouterBuilder};
 

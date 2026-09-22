@@ -5,6 +5,7 @@
 //! space after `:` and `,` that `serde_json` omits. A different string is a different
 //! tokenisation, which is a different prediction.
 
+use std::borrow::Cow;
 use std::io;
 
 use serde::Serialize;
@@ -51,10 +52,10 @@ pub fn dumps(value: &Value) -> String {
 /// anything structured is dumped as JSON.
 ///
 /// This is how the state, the instructions and every criterion reach the model.
-pub fn render(value: &Value) -> String {
+pub fn render(value: &Value) -> Cow<'_, str> {
     match value {
-        Value::String(s) => s.clone(),
-        other => dumps(other),
+        Value::String(s) => Cow::Borrowed(s),
+        other => Cow::Owned(dumps(other)),
     }
 }
 

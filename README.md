@@ -1,4 +1,4 @@
-# laya-rs
+# laya-candle
 
 Use this crate to classify, score or check a piece of text from your Rust code: give it a message and a few questions, and it answers each one with a label, a score or a yes/no probability you can branch on. It helps with triaging support tickets, sorting emails, moderating posts, guarding prompts before they reach an LLM, and any other case where you need a reliable decision rather than generated text.
 
@@ -24,7 +24,7 @@ output length.
 
 ```toml
 [dependencies]
-laya-rs = "0.1"
+laya-candle = "0.1"
 serde_json = "1"
 ```
 
@@ -33,7 +33,7 @@ Rust 1.88+. A C compiler is needed once (`candle-core` pulls in `onig`).
 Library only, no CLI:
 
 ```toml
-laya-rs = { version = "0.1", default-features = false, features = ["hub"] }
+laya-candle = { version = "0.1", default-features = false, features = ["hub"] }
 ```
 
 ## Quickstart
@@ -129,7 +129,7 @@ where it can go and what it can sit inside of:
 ## CLI
 
 ```console
-$ cargo install laya-rs
+$ cargo install laya-candle
 
 $ laya predict -s @examples/data/email.json -q triage
 routed to english — English Latin text
@@ -209,10 +209,10 @@ Everything runs in f32 on the CPU by default. On 24 cores, no BLAS:
 Enable the feature that matches your hardware before judging speed:
 
 ```toml
-laya-rs = { version = "0.1", features = ["mkl"] }        # Intel CPU
-laya-rs = { version = "0.1", features = ["accelerate"] } # macOS
-laya-rs = { version = "0.1", features = ["cuda"] }       # NVIDIA
-laya-rs = { version = "0.1", features = ["metal"] }      # Apple GPU
+laya-candle = { version = "0.1", features = ["mkl"] }        # Intel CPU
+laya-candle = { version = "0.1", features = ["accelerate"] } # macOS
+laya-candle = { version = "0.1", features = ["cuda"] }       # NVIDIA
+laya-candle = { version = "0.1", features = ["metal"] }      # Apple GPU
 ```
 
 Each question is its own batch row carrying a copy of the state, so 15 questions cost about 10x

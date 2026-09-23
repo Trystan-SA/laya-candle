@@ -47,7 +47,7 @@ fn pool() -> Questions {
 
 fn main() -> Result<(), laya::Error> {
     let before = common::rss().unwrap_or(0);
-    println!("laya-rs latency benchmark");
+    println!("laya-candle latency benchmark");
     println!(
         "build: {}",
         if cfg!(debug_assertions) { "debug — numbers are meaningless" } else { "release" }

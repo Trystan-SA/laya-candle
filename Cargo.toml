@@ -1,10 +1,10 @@
 [package]
-name = "laya-rs"
+name = "laya-candle"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Non-autoregressive typed-decision engine (choice / score / noul) with calibrated probabilities — a pure-Rust port of laya, runnable in any project."
-repository = "https://github.com/somanyways/laya-rs"
+repository = "https://github.com/Trystan-SA/laya-rs"
 license = "Apache-2.0"
 keywords = ["nlp", "classification", "modernbert", "candle", "inference"]
 categories = ["science", "text-processing"]

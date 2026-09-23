@@ -230,7 +230,7 @@ fn guard_separation(agent: &Agent, checks: &mut Checks) -> Result<(), laya::Erro
 
 fn main() -> Result<(), laya::Error> {
     let started = Instant::now();
-    println!("laya-rs reliability benchmark");
+    println!("laya-candle reliability benchmark");
     println!("build: {}", if cfg!(debug_assertions) { "debug" } else { "release" });
 
     let agent = Agent::from_hub("convaiinnovations/laya", None)?;

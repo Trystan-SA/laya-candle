@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::calibration::{confidence_from_probs, round4};
 use crate::router::RouteDecision;
 
 /// The auxiliary action head's read on a question.
@@ -32,15 +33,27 @@ pub enum Answer {
 }
 
 impl Answer {
-    /// Calibrated confidence in this answer, between 0 and 1.
+    /// The `confidence` the answer carries, exactly as the reference publishes it.
     ///
-    /// For `choice` and `score` this is normalised entropy over the options; for `noul` it is
-    /// the distance of the probability from a coin flip.
+    /// The scale depends on the primitive: for `choice` and `score` it is one minus the
+    /// normalised entropy over the options, 0 for a uniform distribution and 1 for a certain
+    /// one; for `noul` it is `max(p, 1 - p)`, which never drops below 0.5. Compare answers of
+    /// different primitives with [`certainty`](Answer::certainty) instead.
     pub fn confidence(&self) -> f32 {
         match self {
             Answer::Choice { confidence, .. }
             | Answer::Score { confidence, .. }
             | Answer::Noul { confidence, .. } => *confidence,
+        }
+    }
+
+    /// Confidence on one scale for every primitive: one minus the normalised entropy of the
+    /// answer's distribution, 0 for a uniform one (a coin-flip `noul` included) and 1 for a
+    /// certain one. Equal to [`confidence`](Answer::confidence) for `choice` and `score`.
+    pub fn certainty(&self) -> f32 {
+        match self {
+            Answer::Choice { confidence, .. } | Answer::Score { confidence, .. } => *confidence,
+            Answer::Noul { noul, .. } => round4(confidence_from_probs(&[1.0 - noul, *noul], 2)),
         }
     }
 
@@ -120,7 +133,12 @@ impl Prediction {
         self.answers.get(id)
     }
 
-    /// Every question whose answer is below `threshold`, for confidence gating.
+    /// Every question whose answer's [`certainty`](Answer::certainty) is below `threshold`, for
+    /// confidence gating.
+    ///
+    /// Certainty puts every primitive on the same 0-to-1 scale, so one threshold means the same
+    /// thing for a boolean as for a ten-way choice: a coin-flip `noul` has certainty 0, where
+    /// its published `confidence` is 0.5.
     ///
     /// The probabilities are trained against strictly proper scoring rules, so gating on them is
     /// meaningful — but only within a checkpoint's competence: the English checkpoint scores
@@ -128,7 +146,7 @@ impl Prediction {
     pub fn below_confidence(&self, threshold: f32) -> Vec<&str> {
         self.answers
             .iter()
-            .filter(|(_, a)| a.confidence() < threshold)
+            .filter(|(_, a)| a.certainty() < threshold)
             .map(|(id, _)| id.as_str())
             .collect()
     }
@@ -186,6 +204,10 @@ mod tests {
             routing: None,
         };
         assert_eq!(p.below_confidence(0.9), vec!["meh", "coin"]);
+        // A coin flip is flagged at any positive threshold, as a uniform choice would be.
+        assert_eq!(p.below_confidence(0.01), vec!["meh", "coin"]);
+        assert_eq!(p.get("coin").map(Answer::certainty), Some(0.0));
+        assert_eq!(p.get("coin").map(Answer::confidence), Some(0.5));
         assert_eq!(p.get("sure").map(Answer::confidence), Some(0.99));
         assert!(p.get("nope").is_none());
     }

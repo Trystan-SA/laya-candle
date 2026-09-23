@@ -105,7 +105,7 @@ pub use agent::Agent;
 pub use answer::{Action, Answer, Prediction, Usage};
 pub use checkpoint::Checkpoint;
 pub use config::AgentConfig;
-pub use device::default_device;
+pub use device::{DeviceChoice, default_device, device_from_env};
 pub use error::{Error, Result};
 pub use lang::{Detection, analyse as detect_language, detect_script};
 pub use question::{QType, Question, Questions};

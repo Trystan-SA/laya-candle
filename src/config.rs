@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use candle_transformers::models::modernbert;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,7 +13,9 @@ use crate::question::QType;
 
 /// The decision-model side of a checkpoint, as stored in `rl_agent_config.json`.
 ///
-/// Every field falls back to its [`Default`] when the file leaves it out.
+/// Deserialising fills any missing field from [`Default`]; [`AgentConfig::load`] additionally
+/// requires `encoder` and `head_layers`, as the reference does, because a head depth silently
+/// defaulted to 2 would run a truncated head on a checkpoint trained with more layers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
@@ -27,8 +30,8 @@ pub struct AgentConfig {
     pub act_costs: HashMap<String, f64>,
     /// Per-type calibration temperature, indexed by [`QType::index`].
     pub temperature: Vec<f32>,
-    /// Finer calibration, keyed by `"<type>:<option-count bucket>"`.
-    pub temperature_by_options: HashMap<String, f32>,
+    /// Finer calibration, keyed by `"<type>:<option-count bucket>"`, in file order.
+    pub temperature_by_options: IndexMap<String, f32>,
 }
 
 impl Default for AgentConfig {
@@ -40,12 +43,30 @@ impl Default for AgentConfig {
             head_max_len: 192,
             act_costs: HashMap::new(),
             temperature: vec![1.0; QType::ALL.len()],
-            temperature_by_options: HashMap::new(),
+            temperature_by_options: IndexMap::new(),
         }
     }
 }
 
+/// Keys `rl_agent_config.json` must spell out rather than leave to a default.
+const REQUIRED_AGENT_KEYS: [&str; 2] = ["encoder", "head_layers"];
+
 impl AgentConfig {
+    /// Read `rl_agent_config.json`, refusing one that leaves out a [`REQUIRED_AGENT_KEYS`] entry.
+    pub fn load(path: &Path) -> Result<Self> {
+        let v: Value = read_json(path)?;
+        let missing: Vec<_> =
+            REQUIRED_AGENT_KEYS.into_iter().filter(|k| v.get(*k).is_none()).collect();
+        if !missing.is_empty() {
+            return Err(Error::Checkpoint(format!(
+                "{}: missing configuration keys {missing:?}, so it is not a laya decision \
+                 checkpoint config",
+                path.display()
+            )));
+        }
+        serde_json::from_value(v).map_err(|e| Error::json(path.display(), e))
+    }
+
     /// Width of the auxiliary action head.
     pub fn n_act(&self) -> usize {
         self.act_costs.len() + 1
@@ -74,6 +95,15 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
             Error::Checkpoint(format!("{}: missing or invalid {key:?}", path.display()))
         })
     };
+    // candle divides by these, so a zero would panic inside the model build instead of failing
+    // here with the file named.
+    let nonzero = |key: &str, n: usize| -> Result<usize> {
+        if n == 0 {
+            Err(Error::Checkpoint(format!("{}: {key:?} must be at least 1", path.display())))
+        } else {
+            Ok(n)
+        }
+    };
 
     let rope = |kind: &str, flat: &str, fallback: f64| -> f64 {
         v.get("rope_parameters")
@@ -84,11 +114,23 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
             .unwrap_or(fallback)
     };
 
+    let hidden_size = nonzero("hidden_size", usize_at("hidden_size")?)?;
+    let num_attention_heads = nonzero("num_attention_heads", usize_at("num_attention_heads")?)?;
+    if hidden_size % num_attention_heads != 0 {
+        return Err(Error::Checkpoint(format!(
+            "{}: hidden_size {hidden_size} is not a multiple of num_attention_heads \
+             {num_attention_heads}",
+            path.display()
+        )));
+    }
+    let global_attn_every_n_layers =
+        nonzero("global_attn_every_n_layers", u64_or("global_attn_every_n_layers", 3) as usize)?;
+
     Ok(modernbert::Config {
         vocab_size: usize_at("vocab_size")?,
-        hidden_size: usize_at("hidden_size")?,
+        hidden_size,
         num_hidden_layers: usize_at("num_hidden_layers")?,
-        num_attention_heads: usize_at("num_attention_heads")?,
+        num_attention_heads,
         intermediate_size: usize_at("intermediate_size")?,
         max_position_embeddings: usize_at("max_position_embeddings")?,
         layer_norm_eps: v
@@ -97,7 +139,7 @@ pub fn load_encoder_config(path: &Path) -> Result<modernbert::Config> {
             .and_then(Value::as_f64)
             .unwrap_or(1e-5),
         pad_token_id: u64_or("pad_token_id", 0) as u32,
-        global_attn_every_n_layers: u64_or("global_attn_every_n_layers", 3) as usize,
+        global_attn_every_n_layers,
         global_rope_theta: rope("full_attention", "global_rope_theta", 160_000.0),
         local_attention: u64_or("local_attention", 128) as usize,
         local_rope_theta: rope("sliding_attention", "local_rope_theta", 10_000.0),
@@ -122,6 +164,19 @@ mod tests {
         assert_eq!((cfg.head_layers, cfg.max_len, cfg.head_max_len), (2, 512, 192));
         assert_eq!(cfg.temperature, vec![1.0; 3]);
         assert_eq!(cfg.n_act(), 1);
+    }
+
+    #[test]
+    fn a_config_must_name_its_encoder_and_head_depth() {
+        let dir = scratch_dir("agent-cfg");
+        let path = dir.join("rl_agent_config.json");
+
+        std::fs::write(&path, json!({"encoder": "x", "max_len": 256}).to_string()).unwrap();
+        let err = AgentConfig::load(&path).unwrap_err();
+        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("head_layers")), "{err}");
+
+        std::fs::write(&path, json!({"encoder": "x", "head_layers": 3}).to_string()).unwrap();
+        assert_eq!(AgentConfig::load(&path).unwrap().head_layers, 3);
     }
 
     fn write(dir: &Path, v: serde_json::Value) -> PathBuf {
@@ -168,6 +223,18 @@ mod tests {
         bert["model_type"] = json!("bert");
         let err = load_encoder_config(&write(&dir, bert)).unwrap_err();
         assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("unsupported")), "{err}");
+
+        for (key, value) in [
+            ("num_attention_heads", json!(0)),
+            ("global_attn_every_n_layers", json!(0)),
+            ("hidden_size", json!(0)),
+            ("num_attention_heads", json!(3)),
+        ] {
+            let mut bad = shape();
+            bad[key] = value;
+            let err = load_encoder_config(&write(&dir, bad)).unwrap_err();
+            assert!(matches!(err, Error::Checkpoint(ref m) if m.contains(key)), "{key}: {err}");
+        }
 
         let mut headless = shape();
         headless.as_object_mut().unwrap().remove("hidden_size");

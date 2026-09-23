@@ -22,17 +22,27 @@ pub struct SpecialTokens {
 ///
 /// The config is optional: the defaults below cover a `tokenizer.json` that stands on its own.
 pub fn load(tok_path: &Path, cfg_path: Option<&Path>) -> Result<(Tokenizer, SpecialTokens)> {
-    let mut tokenizer = Tokenizer::from_file(tok_path)
+    let tokenizer = Tokenizer::from_file(tok_path)
         .map_err(|e| Error::Tokenizer(format!("{}: {e}", tok_path.display())))?;
-    // The sequence builder does its own truncation and padding; a `tokenizer.json` that ships
-    // either would otherwise pad every encode to `max_length` for nothing.
-    tokenizer.with_truncation(None)?;
-    tokenizer.with_padding(None);
-
     let cfg: Value = match cfg_path {
         Some(path) => crate::error::read_json(path)?,
         None => Value::Null,
     };
+    prepare(tokenizer, &cfg, &tok_path.display().to_string())
+}
+
+/// Ready a parsed tokenizer for the sequence builder and resolve its special tokens from
+/// `cfg`, the parsed `tokenizer_config.json` (`Null` when there is none). `label` names the
+/// tokenizer in errors.
+pub(crate) fn prepare(
+    mut tokenizer: Tokenizer,
+    cfg: &Value,
+    label: &str,
+) -> Result<(Tokenizer, SpecialTokens)> {
+    // The sequence builder does its own truncation and padding; a `tokenizer.json` that ships
+    // either would otherwise pad every encode to `max_length` for nothing.
+    tokenizer.with_truncation(None)?;
+    tokenizer.with_padding(None);
 
     // A special token is stored either as a plain string or as an AddedToken object.
     let token_text = |key: &str, fallback: &str| -> String {
@@ -48,10 +58,7 @@ pub fn load(tok_path: &Path, cfg_path: Option<&Path>) -> Result<(Tokenizer, Spec
     let resolve = |key: &str, fallback: &str| -> Result<(u32, String)> {
         let text = token_text(key, fallback);
         let id = tokenizer.token_to_id(&text).ok_or_else(|| {
-            Error::Tokenizer(format!(
-                "{}: the tokenizer has no id for {key} = {text:?}",
-                tok_path.display()
-            ))
+            Error::Tokenizer(format!("{label}: the tokenizer has no id for {key} = {text:?}"))
         })?;
         Ok((id, text))
     };

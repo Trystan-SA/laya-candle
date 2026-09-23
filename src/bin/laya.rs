@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use laya::{Answer, ModelName, ModelSpec, Prediction, Questions, RouteOptions, Router, presets};
+use laya::{
+    Answer, DeviceChoice, ModelName, ModelSpec, Prediction, Questions, RouteOptions, Router,
+    presets,
+};
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -49,6 +52,11 @@ struct PredictArgs {
     #[arg(long, value_name = "DIR")]
     checkpoint: Option<PathBuf>,
 
+    /// Where to run: auto, cpu, cuda, cuda:N, metal or metal:N. Defaults to $LAYA_DEVICE, else
+    /// auto. An accelerator needs a build with its feature (`--features cuda` / `metal`).
+    #[arg(long, value_name = "DEVICE")]
+    device: Option<String>,
+
     /// Print the full result as JSON instead of a summary.
     #[arg(long)]
     json: bool,
@@ -81,7 +89,16 @@ fn predict(args: PredictArgs) -> anyhow::Result<()> {
     let state = read_state(&args.state)?;
     let questions = read_questions(&args.questions)?;
 
-    let mut router = Router::builder();
+    let choice = match &args.device {
+        Some(name) => name.parse::<DeviceChoice>()?,
+        None => DeviceChoice::from_env()?,
+    };
+    let device = choice.resolve()?;
+    if !args.json {
+        eprintln!("running on {}", laya::device::describe(&device));
+    }
+
+    let mut router = Router::builder().device(device);
     let mut opts =
         RouteOptions { model: args.model.clone(), lang: args.lang.clone(), ..Default::default() };
     if let Some(dir) = &args.checkpoint {
@@ -107,8 +124,11 @@ fn predict(args: PredictArgs) -> anyhow::Result<()> {
 fn route(args: RouteArgs) -> anyhow::Result<()> {
     let state = read_state(&args.state)?;
     let questions = read_questions(&args.questions)?;
-    // Routing never touches the weights, so nothing is downloaded here.
-    let router = Router::builder().auto_task_detection(args.auto_task_detection).build()?;
+    // Routing never touches the weights, so nothing is downloaded here and no GPU is opened.
+    let router = Router::builder()
+        .device(DeviceChoice::Cpu.resolve()?)
+        .auto_task_detection(args.auto_task_detection)
+        .build()?;
     let decision = router.route(&state, &questions, &Default::default())?;
     println!("{}", serde_json::to_string_pretty(&decision)?);
     Ok(())

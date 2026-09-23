@@ -40,15 +40,23 @@ pub(crate) fn hub_label(repo: &str, subfolder: Option<&str>) -> String {
 }
 
 impl Checkpoint {
-    /// Resolve every file through `fetch`, which fails for a file it cannot find.
-    fn assemble(label: String, mut fetch: impl FnMut(&str) -> Result<PathBuf>) -> Result<Self> {
+    /// Resolve every file through `fetch`, which answers `Ok(None)` for a file that does not
+    /// exist and `Err` for one it could not check; `missing` names the error for an absent
+    /// required file.
+    fn assemble(
+        label: String,
+        mut fetch: impl FnMut(&str) -> Result<Option<PathBuf>>,
+        missing: impl Fn(&str) -> Error,
+    ) -> Result<Self> {
+        let mut required = |name: &str| fetch(name)?.ok_or_else(|| missing(name));
         Ok(Self {
-            agent_config: fetch(AGENT_CONFIG)?,
-            weights: fetch(WEIGHTS)?,
-            encoder_config: fetch(ENCODER_CONFIG)?,
-            tokenizer: fetch(TOKENIZER)?,
-            // A missing optional file must not fail the whole load.
-            tokenizer_config: fetch(TOKENIZER_CONFIG).ok(),
+            agent_config: required(AGENT_CONFIG)?,
+            weights: required(WEIGHTS)?,
+            encoder_config: required(ENCODER_CONFIG)?,
+            tokenizer: required(TOKENIZER)?,
+            // Only an absent optional file is skipped: a failure to fetch one is still a
+            // failure, and would otherwise surface later as the wrong special-token names.
+            tokenizer_config: fetch(TOKENIZER_CONFIG)?,
             label,
         })
     }
@@ -63,18 +71,20 @@ impl Checkpoint {
                 dir.display()
             )));
         }
-        Self::assemble(dir.display().to_string(), |name| {
-            let p = dir.join(name);
-            if p.exists() {
-                Ok(p)
-            } else {
-                Err(Error::Checkpoint(format!(
+        Self::assemble(
+            dir.display().to_string(),
+            |name| {
+                let p = dir.join(name);
+                Ok(p.exists().then_some(p))
+            },
+            |name| {
+                Error::Checkpoint(format!(
                     "{}: missing {name}. A laya checkpoint ships {}.",
                     dir.display(),
                     FILES.join(", ")
-                )))
-            }
-        })
+                ))
+            },
+        )
     }
 }
 
@@ -82,10 +92,38 @@ impl Checkpoint {
 #[cfg(feature = "hub")]
 #[derive(Clone, Debug, Default)]
 pub struct HubOptions {
-    /// A Hub token, for private repositories. Falls back to `HF_TOKEN`.
+    /// A Hub token, for private repositories. Falls back to `HF_TOKEN`, then to the token
+    /// `huggingface-cli login` stored.
     pub token: Option<String>,
     /// Print a progress bar while downloading.
     pub progress: bool,
+}
+
+/// The Hub cache directory, resolved the way `huggingface_hub` does: `HF_HUB_CACHE`, else
+/// `HF_HOME/hub`, else `~/.cache/huggingface/hub`.
+#[cfg(feature = "hub")]
+fn hub_cache_dir() -> Result<PathBuf> {
+    let var = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(dir) = var("HF_HUB_CACHE") {
+        return Ok(dir);
+    }
+    if let Some(home) = var("HF_HOME") {
+        return Ok(home.join("hub"));
+    }
+    // hf-hub's own default panics when there is no home directory; say what to set instead.
+    std::env::home_dir().map(|home| home.join(".cache").join("huggingface").join("hub")).ok_or_else(
+        || {
+            Error::Hub(
+                "no home directory to put the Hub cache in; set HF_HOME or HF_HUB_CACHE".into(),
+            )
+        },
+    )
+}
+
+/// Whether a failed fetch means the file does not exist in the repository.
+#[cfg(feature = "hub")]
+fn is_not_found(e: &hf_hub::api::sync::ApiError) -> bool {
+    matches!(e, hf_hub::api::sync::ApiError::RequestError(e) if matches!(**e, ureq::Error::Status(404, _)))
 }
 
 #[cfg(feature = "hub")]
@@ -95,20 +133,35 @@ impl Checkpoint {
     /// `subfolder` picks one checkpoint out of a repository that bundles several, the way
     /// `convaiinnovations/laya` bundles `multilingual` and `typed-decisions` alongside the
     /// English one at its root. Only the requested subfolder is fetched.
+    ///
+    /// The cache location, the endpoint (`HF_ENDPOINT`) and the token follow the same
+    /// environment variables as the Python `huggingface_hub`.
     pub fn from_hub(repo: &str, subfolder: Option<&str>, opts: &HubOptions) -> Result<Self> {
-        let api = hf_hub::api::sync::ApiBuilder::new()
-            .with_progress(opts.progress)
-            .with_token(opts.token.clone().or_else(|| std::env::var("HF_TOKEN").ok()))
-            .build()
-            .map_err(|e| Error::Hub(e.to_string()))?
-            .model(repo.to_string());
+        let cache = hf_hub::Cache::new(hub_cache_dir()?);
+        // `from_cache` already read the token `huggingface-cli login` stored; only replace it
+        // with one that was actually given.
+        let mut builder =
+            hf_hub::api::sync::ApiBuilder::from_cache(cache).with_progress(opts.progress);
+        if let Some(endpoint) = std::env::var("HF_ENDPOINT").ok().filter(|e| !e.is_empty()) {
+            builder = builder.with_endpoint(endpoint);
+        }
+        let token = opts.token.clone().or_else(|| std::env::var("HF_TOKEN").ok());
+        if let Some(token) = token.filter(|t| !t.is_empty()) {
+            builder = builder.with_token(Some(token));
+        }
+        let api = builder.build().map_err(|e| Error::Hub(e.to_string()))?.model(repo.to_string());
 
         let prefix = subfolder.map(|s| format!("{s}/")).unwrap_or_default();
         let label = hub_label(repo, subfolder);
-        Self::assemble(label.clone(), |name| {
-            api.get(&format!("{prefix}{name}"))
-                .map_err(|e| Error::Hub(format!("{label}: could not fetch {name}: {e}")))
-        })
+        Self::assemble(
+            label.clone(),
+            |name| match api.get(&format!("{prefix}{name}")) {
+                Ok(path) => Ok(Some(path)),
+                Err(e) if is_not_found(&e) => Ok(None),
+                Err(e) => Err(Error::Hub(format!("{label}: could not fetch {name}: {e}"))),
+            },
+            |name| Error::Hub(format!("{label}: {prefix}{name} is not in the repository")),
+        )
     }
 }
 

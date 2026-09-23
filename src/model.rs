@@ -139,7 +139,23 @@ impl DecisionModel {
             })
             .collect();
 
-        let vb = VarBuilder::from_tensors(remapped, DTYPE, device);
+        Self::from_vb(
+            VarBuilder::from_tensors(remapped, DTYPE, device),
+            enc_cfg,
+            head_layers,
+            n_act,
+            device,
+        )
+    }
+
+    /// Build the model from whatever `vb` holds, in the in-memory `encoder.model.*` layout.
+    fn from_vb(
+        vb: VarBuilder,
+        enc_cfg: &modernbert::Config,
+        head_layers: usize,
+        n_act: usize,
+        device: &Device,
+    ) -> Result<Self> {
         let hidden = enc_cfg.hidden_size;
         // The training code derives the head's head count from the width, not from the encoder.
         let n_heads = std::cmp::max(1, hidden / 64);
@@ -220,4 +236,28 @@ impl DecisionModel {
 
         Ok(Forward { logits: logits.to_vec2::<f32>()?, act_probs: act_probs.to_vec2::<f32>()? })
     }
+}
+
+/// Randomly initialised tensors for a model of this shape, keyed as `model.safetensors` stores
+/// them, so tests can load a real (if tiny) checkpoint without downloading one.
+#[cfg(test)]
+pub(crate) fn random_weights(
+    enc_cfg: &modernbert::Config,
+    head_layers: usize,
+    n_act: usize,
+) -> Result<std::collections::HashMap<String, Tensor>> {
+    let varmap = candle_nn::VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DTYPE, &Device::Cpu);
+    DecisionModel::from_vb(vb, enc_cfg, head_layers, n_act, &Device::Cpu)?;
+    let tensors = varmap.data().lock().expect("no other thread holds the VarMap");
+    Ok(tensors
+        .iter()
+        .map(|(k, v)| {
+            let key = match k.strip_prefix("encoder.model.") {
+                Some(rest) => format!("encoder.{rest}"),
+                None => k.clone(),
+            };
+            (key, v.as_tensor().clone())
+        })
+        .collect())
 }

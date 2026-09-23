@@ -21,10 +21,11 @@ use crate::tokenizer::SpecialTokens;
 const MAX_OPTION_TOKENS: usize = 48;
 /// The question head never shrinks below this many instruction tokens.
 const MIN_HEAD_TOKENS: usize = 8;
-/// The state text is cut at this many bytes per sequence slot before it is tokenised. No BPE
-/// token in these vocabularies comes anywhere near this long, so every token that could still
-/// fit in the sequence lies inside the kept prefix; the rest would be tokenised and dropped.
-const MAX_STATE_BYTES_PER_TOKEN: usize = 64;
+/// The state is first tokenised from a prefix of this many bytes per sequence slot, so a huge
+/// state is not tokenised in full only to be cut. Ordinary text runs at a few bytes per token,
+/// but the English vocabulary holds 128-byte and longer tokens (rules of dashes, for one), so
+/// the prefix grows until it yields more tokens than the sequence can hold.
+const STATE_BYTES_PER_TOKEN: usize = 16;
 
 /// One question, encoded and ready to be batched.
 #[derive(Clone, Debug)]
@@ -72,12 +73,23 @@ impl Encoder {
     }
 
     /// Encode the flattened state once; every question in a batch shares it.
+    ///
+    /// Only the first `max_len` tokens can ever be used, so the state is tokenised from a
+    /// prefix that yields more than that, not in full. The token straddling the cut may differ
+    /// from the full tokenisation, which is why the prefix must yield strictly more.
     pub(crate) fn encode_state(&self, state: &str) -> Result<Vec<u32>> {
-        let mut cut = state.len().min(self.max_len * MAX_STATE_BYTES_PER_TOKEN);
-        while !state.is_char_boundary(cut) {
-            cut -= 1;
+        let mut budget = self.max_len.max(1) * STATE_BYTES_PER_TOKEN;
+        loop {
+            let mut cut = state.len().min(budget);
+            while !state.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let ids = self.encode(&self.scrub(&state[..cut]))?;
+            if cut == state.len() || ids.len() > self.max_len {
+                return Ok(ids);
+            }
+            budget = budget.saturating_mul(2);
         }
-        self.encode(&self.scrub(&state[..cut]))
     }
 
     /// Encode one question over an already-encoded state.
@@ -312,9 +324,22 @@ mod tests {
 
     #[test]
     fn encode_state_cuts_at_a_char_boundary() {
-        let enc = encoder(4, 2);
-        // Three-byte characters, so the byte cap (4 * 64) lands inside one.
-        let ids = enc.encode_state(&"€".repeat(200)).unwrap();
-        assert!(!ids.is_empty());
+        // Three-byte characters in words of four, so the prefix cut (5 * 16, then doubled)
+        // lands inside a character.
+        let enc = encoder(5, 2);
+        let ids = enc.encode_state(&"€€€€ ".repeat(200)).unwrap();
+        assert!(ids.len() > 5, "{}", ids.len());
+    }
+
+    #[test]
+    fn long_tokens_do_not_starve_the_state() {
+        // Each 255-byte word is one token, far longer than the first prefix allows per slot.
+        let enc = encoder(8, 2);
+        let state = format!("{} hello", "x".repeat(255)).repeat(20);
+        let got = enc.encode_state(&state).unwrap();
+        assert!(got.len() > 8, "{}", got.len());
+
+        // A state that ends first is tokenised whole.
+        assert_eq!(enc.encode_state("hello world").unwrap(), ids("hello world"));
     }
 }

@@ -75,9 +75,10 @@ impl Question {
         NoulBuilder { instructions: instructions.into(), when_true: None, when_false: None }
     }
 
-    /// The instruction text as the model sees it: strings pass through, anything else is JSON.
+    /// The instruction text as the model sees it: strings pass through, anything else is JSON
+    /// with non-ASCII escaped, as the reference renders it.
     pub fn instructions_text(&self) -> String {
-        pyjson::render(&self.instructions).into_owned()
+        pyjson::render_instructions(&self.instructions).into_owned()
     }
 
     /// The labels an answer can carry, in marker order.
@@ -136,9 +137,12 @@ impl Question {
 
     fn choice_entries(&self, id: &str) -> Result<Vec<(String, Option<Value>)>> {
         let entries: Vec<_> = match self.criteria.as_ref() {
-            // A bare list of labels is shorthand for "no description for any of them".
+            // A bare list of labels is shorthand for "no description for any of them". The
+            // reference turns it into a dict, so a repeated label is one option, not two.
             Some(Value::Array(items)) => {
-                items.iter().map(|v| (pyjson::render(v).into_owned(), None)).collect()
+                let labels: indexmap::IndexSet<String> =
+                    items.iter().map(|v| pyjson::render(v).into_owned()).collect();
+                labels.into_iter().map(|label| (label, None)).collect()
             }
             Some(Value::Object(map)) => map
                 .iter()
@@ -363,6 +367,15 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_label_in_a_list_is_one_option() {
+        let q: Question = serde_json::from_str(
+            r#"{"type":"choice","instructions":"x","criteria":["billing","other","billing"]}"#,
+        )
+        .unwrap();
+        assert_eq!(q.labels("q").unwrap(), vec!["billing", "other"]);
+    }
+
+    #[test]
     fn score_options_are_numbered_levels() {
         let q: Question =
             Question::score("How urgent?").level("not urgent").level("critical").into();
@@ -447,6 +460,16 @@ mod tests {
         let q =
             Question { kind: QType::Noul, instructions: json!({"ask": "refund?"}), criteria: None };
         assert_eq!(q.instructions_text(), r#"{"ask": "refund?"}"#);
+
+        // Python's plain `json.dumps` escapes non-ASCII here, unlike in the state.
+        let q = Question {
+            kind: QType::Noul,
+            instructions: json!({"ask": "remboursé?"}),
+            criteria: None,
+        };
+        assert_eq!(q.instructions_text(), r#"{"ask": "rembours\u00e9?"}"#);
+        let q = Question { kind: QType::Noul, instructions: json!("remboursé?"), criteria: None };
+        assert_eq!(q.instructions_text(), "remboursé?");
     }
 
     #[test]

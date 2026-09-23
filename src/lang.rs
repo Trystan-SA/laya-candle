@@ -43,8 +43,28 @@ const SCRIPT_RANGES: &[(&str, &[(u32, u32)])] = &[
     ("ethiopic", &[(0x1200, 0x137F)]),
     ("khmer", &[(0x1780, 0x17FF)]),
     ("hangul", &[(0x1100, 0x11FF), (0x3130, 0x318F), (0xAC00, 0xD7AF)]),
-    ("kana", &[(0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF)]),
-    ("han", &[(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)]),
+    // Half-width katakana (U+FF66..U+FF9F) is still kana.
+    ("kana", &[(0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF), (0xFF66, 0xFF9F)]),
+    // The supplementary-plane extensions (B onwards) are rarer, but no less Han.
+    ("han", &[(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x20000, 0x323AF)]),
+];
+
+/// Letters of a script not listed in [`SCRIPT_RANGES`] (Syriac, Thaana, N'Ko, Mongolian,
+/// Cherokee, Canadian syllabics, Tifinagh, …). The English checkpoint cannot read those either,
+/// so they count as a non-Latin script rather than being dropped, which would leave a state
+/// written only in them looking letterless and send it to the default checkpoint.
+pub const OTHER_SCRIPT: &str = "other";
+
+/// Latin-derived letters outside the blocks [`script_of`] counts as Latin: IPA, phonetic
+/// extensions, Latin Extended-C/D/E and full-width Latin. The reference ignores them, and they
+/// are not evidence of a script the English checkpoint cannot read, so they are not counted.
+const LATIN_LIKE_RANGES: &[(u32, u32)] = &[
+    (0x0250, 0x02FF),
+    (0x1D00, 0x1DBF),
+    (0x2C60, 0x2C7F),
+    (0xA720, 0xA7FF),
+    (0xAB30, 0xAB6F),
+    (0xFF21, 0xFF5A),
 ];
 
 /// English function words, the baseline every other Latin-script language has to beat.
@@ -140,7 +160,8 @@ const MAX_DEPTH: usize = 6;
 /// What detection concluded about a state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Detection {
-    /// Dominant script: `"latin"`, `"han"`, `"devanagari"`, … or `"unknown"` when there are no letters.
+    /// Dominant script: `"latin"`, `"han"`, `"devanagari"`, …, [`OTHER_SCRIPT`] for letters of an
+    /// unlisted script, or `"unknown"` when there are no letters.
     pub script: String,
     /// Fraction of alphabetic characters belonging to each script found.
     pub script_profile: BTreeMap<String, f32>,
@@ -160,10 +181,11 @@ fn script_of(c: char) -> Option<&'static str> {
     if cp < 0x0250 || (0x1E00..=0x1EFF).contains(&cp) {
         return Some("latin");
     }
-    SCRIPT_RANGES
-        .iter()
-        .find(|(_, ranges)| ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp)))
-        .map(|(name, _)| *name)
+    let in_any = |ranges: &[(u32, u32)]| ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp));
+    if let Some((name, _)) = SCRIPT_RANGES.iter().find(|(_, ranges)| in_any(ranges)) {
+        return Some(name);
+    }
+    (!in_any(LATIN_LIKE_RANGES)).then_some(OTHER_SCRIPT)
 }
 
 /// Alphabetic characters per script, in first-seen order for tie-breaking.
@@ -220,8 +242,14 @@ fn state_text(state: &Value) -> String {
     text
 }
 
+/// The script with the most letters. Ties go to the first-seen non-Latin script, with Latin
+/// considered last, as in the reference: when a state is split evenly between Latin and a
+/// script the English checkpoint cannot read, it must not be handed to that checkpoint.
 fn dominant_script(counts: &ScriptCounts) -> &'static str {
-    first_max(counts.iter().map(|(name, n)| (*name, *n))).map_or("unknown", |(name, _)| name)
+    let non_latin = counts.iter().filter(|(name, _)| **name != "latin");
+    let latin = counts.get_key_value("latin");
+    first_max(non_latin.chain(latin).map(|(name, n)| (*name, *n)))
+        .map_or("unknown", |(name, _)| name)
 }
 
 /// Fraction of alphabetic characters belonging to each detected script.
@@ -374,9 +402,32 @@ mod tests {
     }
 
     #[test]
-    fn a_tie_between_scripts_keeps_the_first_seen() {
-        assert_eq!(detect_script("ab 请尽"), "latin");
+    fn a_tie_with_latin_goes_to_the_other_script() {
+        assert_eq!(detect_script("ab 请尽"), "han");
         assert_eq!(detect_script("请尽 ab"), "han");
+        let d = analyse(&json!("OK 好的"));
+        assert_eq!(d.script, "han");
+        assert!(!d.is_english);
+    }
+
+    #[test]
+    fn a_tie_between_non_latin_scripts_keeps_the_first_seen() {
+        assert_eq!(detect_script("请尽 환불"), "han");
+        assert_eq!(detect_script("환불 请尽"), "hangul");
+    }
+
+    #[test]
+    fn letters_of_an_unlisted_script_are_not_english() {
+        // Thaana (Dhivehi) and Canadian syllabics (Inuktitut) have no entry of their own.
+        for text in ["ދިވެހިބަސް", "ᐃᓄᒃᑎᑐᑦ"] {
+            let d = analyse(&json!(text));
+            assert_eq!(d.script, OTHER_SCRIPT, "{text}");
+            assert!(!d.is_english, "{text}");
+        }
+        assert_eq!(detect_script("ｶﾀｶﾅ"), "kana");
+        assert_eq!(detect_script("𠀀𠀁"), "han");
+        // IPA and full-width Latin are neither Latin text nor a foreign script.
+        assert_eq!(detect_script("ɐɔ ＡＢ"), "unknown");
     }
 
     #[test]

@@ -28,7 +28,7 @@ laya-candle = "0.1"
 serde_json = "1"
 ```
 
-Rust 1.88+. A C compiler is needed once (`candle-core` pulls in `onig`).
+Rust 1.88+. A C compiler is required to build (`candle-core` enables `tokenizers`' `onig` feature, which compiles Oniguruma).
 
 Library only, no CLI:
 
@@ -214,6 +214,25 @@ laya-candle = { version = "0.1", features = ["accelerate"] } # macOS
 laya-candle = { version = "0.1", features = ["cuda"] }       # NVIDIA
 laya-candle = { version = "0.1", features = ["metal"] }      # Apple GPU
 ```
+
+`cuda` needs the CUDA toolkit (`nvcc`) at build time; recent GPUs need a recent toolkit
+(CUDA 12.8+ for RTX 50-series).
+
+Choose the device at run time with `auto` (the default), `cpu`, `cuda`, `cuda:N`, `metal` or
+`metal:N`:
+
+```console
+laya predict -s "..." --device cuda:0       # CLI
+LAYA_DEVICE=cuda:1 my-service               # any program using the crate's defaults
+```
+
+```rust
+let router = laya::Router::builder().device("cuda:0".parse::<laya::DeviceChoice>()?.resolve()?).build()?;
+```
+
+An accelerator asked for by name fails loudly if it cannot be opened (feature not compiled,
+driver missing, bad index); `auto` falls back to the CPU and prints a warning when a compiled-in
+accelerator did not open.
 
 Each question is its own batch row carrying a copy of the state, so 15 questions cost about 10x
 one. Sequences pad to the longest row in the batch, not to `max_len`.

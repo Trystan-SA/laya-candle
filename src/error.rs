@@ -31,6 +31,14 @@ pub enum Error {
     #[error("question {id:?}: {message}")]
     Question { id: String, message: String },
 
+    /// A device name that does not parse, or an accelerator that cannot be opened.
+    #[error("device: {0}")]
+    Device(String),
+
+    /// A prediction was asked for with an empty question set.
+    #[error("no questions to answer")]
+    NoQuestions,
+
     /// An unknown model name was passed to the router.
     #[error("{0}")]
     UnknownModel(String),

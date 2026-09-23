@@ -7,7 +7,7 @@
 //! and it costs microseconds before the forward pass.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use candle_core::Device;
 use indexmap::IndexMap;
@@ -149,7 +149,7 @@ pub struct RouteDecision {
 pub struct RouteOptions {
     /// Force a checkpoint by name.
     pub model: Option<String>,
-    /// Force the typed-decisions checkpoint by naming its task.
+    /// An older spelling of `model`: it takes a checkpoint name, not a workflow name.
     pub task: Option<String>,
     /// Declare the language instead of detecting it.
     pub lang: Option<String>,
@@ -200,13 +200,24 @@ pub struct Router {
     device: Device,
     default: ModelName,
     auto_task_detection: bool,
+    /// Held only for bookkeeping, never across a build or a download.
     loaded: Mutex<Loaded>,
+    /// One per checkpoint, held while it builds, so concurrent requests for the same
+    /// checkpoint share one build while other checkpoints stay servable.
+    building: [Mutex<()>; ModelName::ALL.len()],
+}
+
+/// Take a lock even if a thread panicked while holding it. Nothing here can be left half
+/// updated by a panic, so one failed build must not take the whole router down with it.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Builder for a [`Router`].
 pub struct RouterBuilder {
     models: Specs,
-    device: Device,
+    /// `None` until set: `build` then resolves `LAYA_DEVICE`, so a bad value is an error.
+    device: Option<Device>,
     max_loaded: usize,
     default: ModelName,
     auto_task_detection: bool,
@@ -217,7 +228,7 @@ impl Default for RouterBuilder {
     fn default() -> Self {
         Self {
             models: default_models(),
-            device: crate::device::default_device(),
+            device: None,
             max_loaded: 1,
             default: ModelName::English,
             auto_task_detection: false,
@@ -237,8 +248,10 @@ impl RouterBuilder {
         self
     }
 
+    /// Where every checkpoint runs. Unset, the router uses the device `LAYA_DEVICE` names, or
+    /// the best available one; see [`crate::DeviceChoice`] to pick one by name.
     pub fn device(mut self, device: Device) -> Self {
-        self.device = device;
+        self.device = Some(device);
         self
     }
 
@@ -272,10 +285,14 @@ impl RouterBuilder {
     pub fn build(self) -> Result<Router> {
         let router = Router {
             models: self.models,
-            device: self.device,
+            device: match self.device {
+                Some(d) => d,
+                None => crate::device::device_from_env()?,
+            },
             default: self.default,
             auto_task_detection: self.auto_task_detection,
             loaded: Mutex::new(Loaded { agents: IndexMap::new(), max: self.max_loaded }),
+            building: Default::default(),
         };
         router.preload(self.preload)?;
         Ok(router)
@@ -297,31 +314,44 @@ impl Router {
         &self.models[name as usize]
     }
 
+    /// Where every checkpoint runs.
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// The checkpoints currently resident, least recently used first.
     pub fn loaded(&self) -> Vec<ModelName> {
-        self.loaded.lock().unwrap().agents.keys().copied().collect()
+        lock(&self.loaded).agents.keys().copied().collect()
     }
 
     /// Build a checkpoint now, reusing it if it is already resident.
     ///
-    /// Concurrent callers share one `Agent` rather than building duplicates.
+    /// Concurrent callers share one `Agent` rather than building duplicates, and a build never
+    /// blocks requests for a checkpoint that is already resident.
     pub fn load(&self, name: ModelName) -> Result<Arc<Agent>> {
-        let mut loaded = self.loaded.lock().unwrap();
-        if let Some(agent) = loaded.touch(name) {
+        if let Some(agent) = lock(&self.loaded).touch(name) {
             return Ok(agent);
         }
 
+        let _building = lock(&self.building[name as usize]);
+        // Another caller may have finished building it while this one waited.
+        if let Some(agent) = lock(&self.loaded).touch(name) {
+            return Ok(agent);
+        }
         let agent = Arc::new(build(self.spec(name), &self.device)?);
-        loaded.insert(name, Arc::clone(&agent));
+        lock(&self.loaded).insert(name, Arc::clone(&agent));
         Ok(agent)
     }
 
-    /// Build several checkpoints up front, raising the residency cap to fit them.
+    /// Build several checkpoints up front, raising the residency cap so that neither they nor
+    /// any checkpoint already resident is evicted to make room.
     pub fn preload(&self, names: impl IntoIterator<Item = ModelName>) -> Result<()> {
         let names: Vec<_> = names.into_iter().collect();
         {
-            let mut loaded = self.loaded.lock().unwrap();
-            loaded.max = loaded.max.max(names.len());
+            let mut loaded = lock(&self.loaded);
+            let mut wanted: std::collections::BTreeSet<_> = loaded.agents.keys().copied().collect();
+            wanted.extend(names.iter().copied());
+            loaded.max = loaded.max.max(wanted.len());
         }
         for name in names {
             self.load(name)?;
@@ -331,7 +361,7 @@ impl Router {
 
     /// Free one checkpoint, or all of them.
     pub fn unload(&self, name: Option<ModelName>) {
-        let mut loaded = self.loaded.lock().unwrap();
+        let mut loaded = lock(&self.loaded);
         match name {
             None => loaded.agents.clear(),
             Some(n) => {
@@ -378,7 +408,8 @@ impl Router {
 
         if let Some(lang) = &opts.lang {
             let head = lang.to_lowercase();
-            let head = head.split('-').next().unwrap_or("");
+            // `en-US`, `en_US` and `en` all name English.
+            let head = head.split(['-', '_']).next().unwrap_or("");
             let m = if matches!(head, "en" | "eng" | "english") {
                 ModelName::English
             } else {
@@ -544,9 +575,12 @@ mod tests {
 
     #[test]
     fn an_explicit_lang_picks_the_checkpoint_without_detection() {
-        let en = router().route(&json!("मुझसे"), &questions(), &RouteOptions::lang("en-US")).unwrap();
-        assert_eq!(en.model, ModelName::English);
-        assert!(en.detection.is_none());
+        for code in ["en-US", "en_US", "EN"] {
+            let en =
+                router().route(&json!("मुझसे"), &questions(), &RouteOptions::lang(code)).unwrap();
+            assert_eq!(en.model, ModelName::English, "{code}");
+            assert!(en.detection.is_none());
+        }
 
         let de =
             router().route(&json!("hello there"), &questions(), &RouteOptions::lang("de")).unwrap();
@@ -583,6 +617,46 @@ mod tests {
 
         let d = r.route(&json!("मुझसे"), &questions(), &Default::default()).unwrap();
         assert_eq!(d.repo, format!("{BUNDLE_REPO}/multilingual"));
+    }
+
+    /// A router whose English and multilingual checkpoints are tiny ones on disk.
+    fn tiny_router(dir: &std::path::Path) -> RouterBuilder {
+        let english = dir.join("english");
+        let multilingual = dir.join("multilingual");
+        crate::testutil::write_tiny_checkpoint(&english);
+        crate::testutil::write_tiny_checkpoint(&multilingual);
+        RouterBuilder::new()
+            .device(Device::Cpu)
+            .model(ModelName::English, ModelSpec::Dir(english))
+            .model(ModelName::Multilingual, ModelSpec::Dir(multilingual))
+    }
+
+    #[test]
+    fn preloading_in_steps_keeps_what_is_already_resident() {
+        let dir = crate::testutil::scratch_dir("router-preload");
+        let r = tiny_router(&dir).preload([ModelName::English]).build().unwrap();
+        r.preload([ModelName::Multilingual]).unwrap();
+        assert_eq!(r.loaded(), vec![ModelName::English, ModelName::Multilingual]);
+
+        // A later on-demand load reuses the resident agent rather than rebuilding it.
+        let a = r.load(ModelName::English).unwrap();
+        assert!(Arc::ptr_eq(&a, &r.load(ModelName::English).unwrap()));
+    }
+
+    #[test]
+    fn a_panic_while_building_does_not_take_the_router_down() {
+        let dir = crate::testutil::scratch_dir("router-poison");
+        let r = tiny_router(&dir).preload([ModelName::English]).build().unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = r.loaded.lock().unwrap();
+            let _building = r.building[ModelName::Multilingual as usize].lock().unwrap();
+            panic!("a build blew up");
+        }));
+        assert!(r.loaded.is_poisoned());
+        assert_eq!(r.loaded(), vec![ModelName::English]);
+        r.load(ModelName::Multilingual).unwrap();
+        r.unload(Some(ModelName::English));
+        assert_eq!(r.loaded(), vec![ModelName::Multilingual]);
     }
 
     #[test]

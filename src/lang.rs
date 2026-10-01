@@ -199,8 +199,11 @@ fn script_counts(text: &str) -> ScriptCounts {
     counts
 }
 
-/// The first maximum, the way Python's `max` picks it; `Iterator::max_by_key` keeps the last.
-fn first_max<T>(items: impl IntoIterator<Item = (T, usize)>) -> Option<(T, usize)> {
+/// The first maximum, the way Python's `max` and numpy's `argmax` pick it;
+/// `Iterator::max_by_key` keeps the last.
+pub(crate) fn first_max<T, V: PartialOrd>(
+    items: impl IntoIterator<Item = (T, V)>,
+) -> Option<(T, V)> {
     items.into_iter().reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
 }
 

@@ -65,6 +65,8 @@ candle-core = "0.11.0"
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
+# Shortest round-trip float digits, ties to even as Python's `repr`; tokenizers already pulls it in.
+ryu = "1.0.23"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
 thiserror = "2.0.20"

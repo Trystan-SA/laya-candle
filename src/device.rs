@@ -82,56 +82,39 @@ impl DeviceChoice {
     pub fn resolve(self) -> Result<Device> {
         match self {
             DeviceChoice::Cpu => Ok(Device::Cpu),
-            DeviceChoice::Cuda(n) => open_cuda(n),
-            DeviceChoice::Metal(n) => open_metal(n),
-            DeviceChoice::Auto => Ok(auto()),
+            DeviceChoice::Cuda(n) => CUDA.open(n),
+            DeviceChoice::Metal(n) => METAL.open(n),
+            DeviceChoice::Auto => Ok(default_device()),
         }
     }
 }
 
-#[cfg(feature = "cuda")]
-fn open_cuda(n: usize) -> Result<Device> {
-    Device::new_cuda(n).map_err(|e| Error::Device(format!("cannot open cuda:{n}: {e}")))
+/// A GPU backend: its name, whether this build has its feature, and candle's opener, which
+/// exists either way and fails without the feature.
+#[derive(Clone, Copy)]
+struct Accelerator {
+    name: &'static str,
+    compiled: bool,
+    new: fn(usize) -> candle_core::Result<Device>,
 }
 
-#[cfg(not(feature = "cuda"))]
-fn open_cuda(n: usize) -> Result<Device> {
-    Err(Error::Device(format!(
-        "cuda:{n} was asked for, but this build has the `cuda` feature off; rebuild with \
-         `--features cuda`"
-    )))
-}
+const CUDA: Accelerator =
+    Accelerator { name: "cuda", compiled: cfg!(feature = "cuda"), new: Device::new_cuda };
+const METAL: Accelerator =
+    Accelerator { name: "metal", compiled: cfg!(feature = "metal"), new: Device::new_metal };
 
-#[cfg(feature = "metal")]
-fn open_metal(n: usize) -> Result<Device> {
-    Device::new_metal(n).map_err(|e| Error::Device(format!("cannot open metal:{n}: {e}")))
-}
-
-#[cfg(not(feature = "metal"))]
-fn open_metal(n: usize) -> Result<Device> {
-    Err(Error::Device(format!(
-        "metal:{n} was asked for, but this build has the `metal` feature off; rebuild with \
-         `--features metal`"
-    )))
-}
-
-/// CUDA, then Metal, then the CPU, warning about any compiled-in accelerator that failed.
-fn auto() -> Device {
-    #[cfg(feature = "cuda")]
-    match Device::new_cuda(0) {
-        Ok(d) => return d,
-        Err(e) => eprintln!("[laya] built with `cuda` but cuda:0 did not open ({e}); trying next"),
-    }
-    #[cfg(feature = "metal")]
-    match Device::new_metal(0) {
-        Ok(d) => return d,
-        Err(e) => {
-            eprintln!("[laya] built with `metal` but metal:0 did not open ({e}); trying next")
+impl Accelerator {
+    /// Open GPU `n`, saying why when it cannot be.
+    fn open(self, n: usize) -> Result<Device> {
+        let name = self.name;
+        if !self.compiled {
+            return Err(Error::Device(format!(
+                "{name}:{n} was asked for, but this build has the `{name}` feature off; rebuild \
+                 with `--features {name}`"
+            )));
         }
+        (self.new)(n).map_err(|e| Error::Device(format!("cannot open {name}:{n}: {e}")))
     }
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    eprintln!("[laya] no accelerator available; running on the CPU");
-    Device::Cpu
 }
 
 /// The device `LAYA_DEVICE` names, or the best one this build can reach when it is unset.
@@ -141,20 +124,34 @@ pub fn device_from_env() -> Result<Device> {
     DeviceChoice::from_env()?.resolve()
 }
 
-/// The best device this build can use: CUDA, then Metal, then the CPU.
+/// The best device this build can use: CUDA, then Metal, then the CPU, warning about any
+/// compiled-in accelerator that failed to open.
 ///
 /// Ignores `LAYA_DEVICE` and never fails; prefer [`device_from_env`], which honours it.
 pub fn default_device() -> Device {
-    auto()
+    let compiled = || [CUDA, METAL].into_iter().filter(|a| a.compiled);
+    for Accelerator { name, new, .. } in compiled() {
+        match new(0) {
+            Ok(d) => return d,
+            Err(e) => {
+                eprintln!("[laya] built with `{name}` but {name}:0 did not open ({e}); trying next")
+            }
+        }
+    }
+    if compiled().next().is_some() {
+        eprintln!("[laya] no accelerator available; running on the CPU");
+    }
+    Device::Cpu
 }
 
 /// A short name for a device, for logs and the CLI.
 pub fn describe(device: &Device) -> String {
-    match device.location() {
-        candle_core::DeviceLocation::Cpu => "cpu".to_string(),
-        candle_core::DeviceLocation::Cuda { gpu_id } => format!("cuda:{gpu_id}"),
-        candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
-    }
+    let choice = match device.location() {
+        candle_core::DeviceLocation::Cpu => DeviceChoice::Cpu,
+        candle_core::DeviceLocation::Cuda { gpu_id } => DeviceChoice::Cuda(gpu_id),
+        candle_core::DeviceLocation::Metal { gpu_id } => DeviceChoice::Metal(gpu_id),
+    };
+    choice.to_string()
 }
 
 #[cfg(test)]

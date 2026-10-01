@@ -126,7 +126,7 @@ fn route(args: RouteArgs) -> anyhow::Result<()> {
     let questions = read_questions(&args.questions)?;
     // Routing never touches the weights, so nothing is downloaded here and no GPU is opened.
     let router = Router::builder()
-        .device(DeviceChoice::Cpu.resolve()?)
+        .device(candle_core::Device::Cpu)
         .auto_task_detection(args.auto_task_detection)
         .build()?;
     let decision = router.route(&state, &questions, &Default::default())?;

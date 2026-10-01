@@ -111,13 +111,12 @@ fn hub_cache_dir() -> Result<PathBuf> {
         return Ok(home.join("hub"));
     }
     // hf-hub's own default panics when there is no home directory; say what to set instead.
-    std::env::home_dir().map(|home| home.join(".cache").join("huggingface").join("hub")).ok_or_else(
-        || {
-            Error::Hub(
-                "no home directory to put the Hub cache in; set HF_HOME or HF_HUB_CACHE".into(),
-            )
-        },
-    )
+    let Some(home) = std::env::home_dir() else {
+        return Err(Error::Hub(
+            "no home directory to put the Hub cache in; set HF_HOME or HF_HUB_CACHE".into(),
+        ));
+    };
+    Ok(home.join(".cache").join("huggingface").join("hub"))
 }
 
 /// Whether a failed fetch means the file does not exist in the repository.

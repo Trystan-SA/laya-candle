@@ -144,7 +144,6 @@ impl DecisionModel {
             enc_cfg,
             head_layers,
             n_act,
-            device,
         )
     }
 
@@ -154,7 +153,6 @@ impl DecisionModel {
         enc_cfg: &modernbert::Config,
         head_layers: usize,
         n_act: usize,
-        device: &Device,
     ) -> Result<Self> {
         let hidden = enc_cfg.hidden_size;
         // The training code derives the head's head count from the width, not from the encoder.
@@ -175,7 +173,7 @@ impl DecisionModel {
             act_fc1: candle_nn::linear(hidden + 4, 256, vb.pp("act_head.0"))?,
             act_fc2: candle_nn::linear(256, n_act, vb.pp("act_head.2"))?,
             hidden,
-            device: device.clone(),
+            device: vb.device().clone(),
         })
     }
 
@@ -248,7 +246,7 @@ pub(crate) fn random_weights(
 ) -> Result<std::collections::HashMap<String, Tensor>> {
     let varmap = candle_nn::VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DTYPE, &Device::Cpu);
-    DecisionModel::from_vb(vb, enc_cfg, head_layers, n_act, &Device::Cpu)?;
+    DecisionModel::from_vb(vb, enc_cfg, head_layers, n_act)?;
     let tensors = varmap.data().lock().expect("no other thread holds the VarMap");
     Ok(tensors
         .iter()

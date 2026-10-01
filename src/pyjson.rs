@@ -27,13 +27,6 @@ impl Formatter for PythonFormatter {
         writer.write_all(float_repr(value).as_bytes())
     }
 
-    fn write_f32<W>(&mut self, writer: &mut W, value: f32) -> io::Result<()>
-    where
-        W: ?Sized + io::Write,
-    {
-        self.write_f64(writer, f64::from(value))
-    }
-
     fn write_string_fragment<W>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
     where
         W: ?Sized + io::Write,
@@ -79,17 +72,9 @@ impl Formatter for PythonFormatter {
 
 /// Python's `repr(float)`: the shortest digits that round-trip, in fixed notation for decimal
 /// exponents from -4 to 15 and in `1e-05` / `1.5e+16` notation outside it.
+///
+/// Only finite values reach this: `serde_json` writes the others as `null` itself.
 fn float_repr(value: f64) -> String {
-    if !value.is_finite() {
-        // `serde_json::Value` cannot hold these; Python would write `NaN` / `Infinity`.
-        return if value.is_nan() {
-            "NaN".into()
-        } else if value > 0.0 {
-            "Infinity".into()
-        } else {
-            "-Infinity".into()
-        };
-    }
     let (digits, exp) = shortest_digits(value.abs());
     let sign = if value.is_sign_negative() { "-" } else { "" };
 
@@ -112,55 +97,26 @@ fn float_repr(value: f64) -> String {
     format!("{sign}{body}")
 }
 
-/// Significant digits and decimal exponent of `d.ddd`e`exp` notation, for a finite `v >= 0`.
-fn sci_parts(sci: &str) -> (String, i32) {
-    let (mantissa, exp) = sci.split_once('e').expect("`{:e}` always writes an exponent");
-    let exp = exp.parse().expect("`{:e}` writes an integer exponent");
-    (mantissa.chars().filter(|c| *c != '.').collect(), exp)
-}
-
-/// The shortest digits that round-trip to `v`, choosing the one nearest `v` and, on an exact
-/// tie, the one ending in an even digit, as Python does. `{:e}` finds the right length but
-/// breaks ties upwards (`…094.25` becomes `…094.3` where Python writes `…094.2`).
+/// The shortest digits that round-trip to a finite `v >= 0`, and the decimal exponent of the
+/// first. Like Python, ryu takes the candidate nearest `v` and, on an exact tie, the one ending
+/// in an even digit; std's `{:e}` breaks ties upwards (`…094.25` becomes `…094.3` where Python
+/// writes `…094.2`).
 fn shortest_digits(v: f64) -> (String, i32) {
-    let (digits, exp) = sci_parts(&format!("{v:e}"));
     if v == 0.0 {
-        return (digits, exp);
+        return ("0".into(), 0);
     }
-    // A double's exact decimal expansion has at most 767 significant digits.
-    let (exact, exact_exp) = sci_parts(&format!("{v:.767e}"));
-    let n = digits.len();
-    let (head, rest) = exact.split_at(n);
-    let rest = rest.as_bytes();
-    let round_up = match rest.first() {
-        Some(b'6'..=b'9') => true,
-        Some(b'5') => {
-            rest[1..].iter().any(|&b| b != b'0') || (head.as_bytes()[n - 1] - b'0') % 2 == 1
-        }
-        _ => false,
+    let mut buf = ryu::Buffer::new();
+    // ryu writes `0.001`, `123.0`, `1.5e16` or `1e-7`.
+    let s = buf.format_finite(v);
+    let (mantissa, e) = match s.split_once('e') {
+        Some((m, e)) => (m, e.parse::<i32>().expect("ryu writes an integer exponent")),
+        None => (s, 0),
     };
-    let (mut nearest, mut nearest_exp) = (head.as_bytes().to_vec(), exact_exp);
-    if round_up {
-        match nearest.iter().rposition(|&b| b != b'9') {
-            Some(i) => {
-                nearest[i] += 1;
-                nearest[i + 1..].fill(b'0');
-            }
-            None => {
-                nearest = [b"1".as_slice(), &vec![b'0'; n - 1]].concat();
-                nearest_exp += 1;
-            }
-        }
-    }
-    let nearest = String::from_utf8(nearest).expect("ASCII digits");
-    let nearest = nearest.trim_end_matches('0');
-    let nearest = if nearest.is_empty() { "0" } else { nearest };
-    // At a power of two the round-trip interval is lopsided, so check before trusting it.
-    let (int, frac) = nearest.split_at(1);
-    match format!("{int}.{frac}0e{nearest_exp}").parse::<f64>() {
-        Ok(back) if back == v => (nearest.to_string(), nearest_exp),
-        _ => (digits, exp),
-    }
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = format!("{int}{frac}");
+    let digits = all.trim_start_matches('0');
+    let lead = (all.len() - digits.len()) as i32;
+    (digits.trim_end_matches('0').to_string(), int.len() as i32 - 1 - lead + e)
 }
 
 fn dumps_with(value: &Value, formatter: PythonFormatter) -> String {

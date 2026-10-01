@@ -1,6 +1,6 @@
 //! The inference runtime: load a checkpoint, answer typed questions in one forward pass.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use candle_core::Device;
@@ -12,6 +12,7 @@ use crate::calibration::{Calibration, confidence_from_probs, round4, softmax};
 use crate::checkpoint::Checkpoint;
 use crate::config::{AgentConfig, load_encoder_config};
 use crate::error::{Error, Result};
+use crate::lang::first_max;
 use crate::model::DecisionModel;
 use crate::pyjson;
 use crate::question::{QType, Questions};
@@ -180,12 +181,7 @@ impl Agent {
 
             let answer = match q.kind {
                 QType::Choice => {
-                    // The first of tied maxima, as numpy's `argmax` picks it.
-                    let choice = item
-                        .labels
-                        .iter()
-                        .zip(&p)
-                        .reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
+                    let choice = first_max(item.labels.iter().zip(&p))
                         .map(|(label, _)| label.clone())
                         .expect("a choice has at least one option");
                     Answer::Choice {
@@ -238,12 +234,8 @@ fn distribution(labels: &[String], p: &[f32]) -> IndexMap<String, f32> {
 const OPTIONAL_KEYS: [&str; 1] = ["temperature"];
 
 /// The layer indices under `prefix` (`"head.layers."` → the `N` of `head.layers.N.*`).
-fn layer_indices<'a>(keys: impl Iterator<Item = &'a String>, prefix: &str) -> Vec<usize> {
-    let mut found: Vec<usize> =
-        keys.filter_map(|k| k.strip_prefix(prefix)?.split('.').next()?.parse().ok()).collect();
-    found.sort_unstable();
-    found.dedup();
-    found
+fn layer_indices<'a>(keys: impl Iterator<Item = &'a String>, prefix: &str) -> BTreeSet<usize> {
+    keys.filter_map(|k| k.strip_prefix(prefix)?.split('.').next()?.parse().ok()).collect()
 }
 
 /// Refuse a checkpoint whose tensors do not match its config, as the reference's
@@ -260,7 +252,7 @@ fn verify_layout(
         ("encoder.layers.", encoder_layers, "num_hidden_layers in encoder/config.json"),
     ] {
         let found = layer_indices(weights.keys(), prefix);
-        if found != (0..expected).collect::<Vec<_>>() {
+        if found.iter().copied().ne(0..expected) {
             return Err(Error::Checkpoint(format!(
                 "{label}: {source} says {expected} layers, but model.safetensors has {prefix}* \
                  layers {found:?}"

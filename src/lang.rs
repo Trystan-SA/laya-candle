@@ -199,12 +199,17 @@ fn script_counts(text: &str) -> ScriptCounts {
     counts
 }
 
-/// The first maximum, the way Python's `max` and numpy's `argmax` pick it;
-/// `Iterator::max_by_key` keeps the last.
+/// The first maximum, the way numpy's `argmax` picks it, and Python's `max` for numbers;
+/// `Iterator::max_by_key` keeps the last. As in `argmax`, the first NaN beats every number.
 pub(crate) fn first_max<T, V: PartialOrd>(
     items: impl IntoIterator<Item = (T, V)>,
 ) -> Option<(T, V)> {
-    items.into_iter().reduce(|best, cur| if cur.1 > best.1 { cur } else { best })
+    // Only a NaN is unordered against itself.
+    let is_nan = |v: &V| v.partial_cmp(v).is_none();
+    items.into_iter().reduce(|best, cur| {
+        let wins = !is_nan(&best.1) && (is_nan(&cur.1) || cur.1 > best.1);
+        if wins { cur } else { best }
+    })
 }
 
 /// Append the string leaves of a state, in order and space-separated. Keys are ignored: they
@@ -417,6 +422,15 @@ mod tests {
     fn a_tie_between_non_latin_scripts_keeps_the_first_seen() {
         assert_eq!(detect_script("请尽 환불"), "han");
         assert_eq!(detect_script("환불 请尽"), "hangul");
+    }
+
+    #[test]
+    fn first_max_picks_like_argmax() {
+        assert_eq!(first_max([("a", 1), ("b", 3), ("c", 3)]), Some(("b", 3)));
+        let pick = |p: [f32; 3]| first_max(["a", "b", "c"].into_iter().zip(p)).map(|(l, _)| l);
+        assert_eq!(pick([0.2, f32::NAN, 0.8]), Some("b"));
+        assert_eq!(pick([f32::NAN, 0.9, f32::NAN]), Some("a"));
+        assert_eq!(first_max(std::iter::empty::<((), u8)>()), None);
     }
 
     #[test]

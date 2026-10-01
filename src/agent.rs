@@ -233,9 +233,11 @@ fn distribution(labels: &[String], p: &[f32]) -> IndexMap<String, f32> {
 /// the training-time temperature parameter, which inference reads from the config instead.
 const OPTIONAL_KEYS: [&str; 1] = ["temperature"];
 
-/// The layer indices under `prefix` (`"head.layers."` → the `N` of `head.layers.N.*`).
-fn layer_indices<'a>(keys: impl Iterator<Item = &'a String>, prefix: &str) -> BTreeSet<usize> {
-    keys.filter_map(|k| k.strip_prefix(prefix)?.split('.').next()?.parse().ok()).collect()
+/// The layer a key sits in under `prefix` (`head.layers.2.linear1.weight` → 2), or `None` when
+/// it is outside `prefix` or its segment is not an index as PyTorch writes one (`01`, `norm`).
+fn layer_index(key: &str, prefix: &str) -> Option<usize> {
+    let seg = key.strip_prefix(prefix)?.split('.').next()?;
+    seg.parse().ok().filter(|n: &usize| n.to_string() == seg)
 }
 
 /// Refuse a checkpoint whose tensors do not match its config, as the reference's
@@ -247,12 +249,15 @@ fn verify_layout(
     head_layers: usize,
     encoder_layers: usize,
 ) -> Result<()> {
-    for (prefix, expected, source) in [
+    let layered = [
         ("head.layers.", head_layers, "head_layers in rl_agent_config.json"),
         ("encoder.layers.", encoder_layers, "num_hidden_layers in encoder/config.json"),
-    ] {
-        let found = layer_indices(weights.keys(), prefix);
+    ];
+    for (prefix, expected, source) in layered {
+        let found: BTreeSet<usize> =
+            weights.keys().filter_map(|k| layer_index(k, prefix)).collect();
         if found.iter().copied().ne(0..expected) {
+            let found: Vec<_> = found.into_iter().collect();
             return Err(Error::Checkpoint(format!(
                 "{label}: {source} says {expected} layers, but model.safetensors has {prefix}* \
                  layers {found:?}"
@@ -260,10 +265,11 @@ fn verify_layout(
         }
     }
 
-    let known = |k: &str| {
-        OPTIONAL_KEYS.contains(&k)
-            || k.starts_with("head.layers.")
-            || REQUIRED_PREFIXES.iter().any(|p| k.starts_with(p))
+    // Under a layered prefix only a numbered layer is part of the model, and the loop above has
+    // already held those numbers to the config.
+    let known = |k: &str| match layered.iter().find(|(prefix, ..)| k.starts_with(prefix)) {
+        Some((prefix, ..)) => layer_index(k, prefix).is_some(),
+        None => OPTIONAL_KEYS.contains(&k) || REQUIRED_PREFIXES.iter().any(|p| k.starts_with(p)),
     };
     let mut unexpected: Vec<_> = weights.keys().filter(|k| !known(k)).collect();
     if !unexpected.is_empty() {
@@ -330,17 +336,30 @@ mod tests {
         assert!(verify_layout(&weights(&keys), "cp", 3, 2).is_ok());
 
         let err = verify_layout(&weights(&keys), "cp", 2, 2).unwrap_err();
-        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("head_layers")), "{err}");
+        assert!(
+            matches!(err, Error::Checkpoint(ref m)
+                if m.contains("head_layers") && m.contains("[0, 1, 2]")),
+            "{err}"
+        );
         let err = verify_layout(&weights(&keys), "cp", 3, 3).unwrap_err();
         assert!(
             matches!(err, Error::Checkpoint(ref m) if m.contains("num_hidden_layers")),
             "{err}"
         );
 
-        let mut extra = keys.to_vec();
-        extra.push("pooler.weight");
-        let err = verify_layout(&weights(&extra), "cp", 3, 2).unwrap_err();
-        assert!(matches!(err, Error::Checkpoint(ref m) if m.contains("pooler.weight")), "{err}");
+        // Neither an unknown tensor nor one under a layer prefix but outside any numbered layer
+        // is read; `01` would otherwise pass for layer 1.
+        for stray in [
+            "pooler.weight",
+            "head.layers.norm.weight",
+            "head.layers.01.linear1.weight",
+            "encoder.layers.+1.attn.Wqkv.weight",
+        ] {
+            let mut extra = keys.to_vec();
+            extra.push(stray);
+            let err = verify_layout(&weights(&extra), "cp", 3, 2).unwrap_err();
+            assert!(matches!(err, Error::Checkpoint(ref m) if m.contains(stray)), "{stray}: {err}");
+        }
     }
 
     #[test]

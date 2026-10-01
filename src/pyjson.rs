@@ -27,6 +27,15 @@ impl Formatter for PythonFormatter {
         writer.write_all(float_repr(value).as_bytes())
     }
 
+    /// A `Value` holds no f32, but anything else serialised here gets Python's spelling too,
+    /// not serde_json's: Python only knows doubles, so an f32 is written as one.
+    fn write_f32<W>(&mut self, writer: &mut W, value: f32) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        self.write_f64(writer, f64::from(value))
+    }
+
     fn write_string_fragment<W>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
     where
         W: ?Sized + io::Write,
@@ -75,6 +84,8 @@ impl Formatter for PythonFormatter {
 ///
 /// Only finite values reach this: `serde_json` writes the others as `null` itself.
 fn float_repr(value: f64) -> String {
+    // ryu would print some arbitrary number for these, silently changing the tokens.
+    debug_assert!(value.is_finite(), "non-finite float {value} reached float_repr");
     let (digits, exp) = shortest_digits(value.abs());
     let sign = if value.is_sign_negative() { "-" } else { "" };
 
@@ -113,10 +124,16 @@ fn shortest_digits(v: f64) -> (String, i32) {
         None => (s, 0),
     };
     let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let all = format!("{int}{frac}");
-    let digits = all.trim_start_matches('0');
-    let lead = (all.len() - digits.len()) as i32;
-    (digits.trim_end_matches('0').to_string(), int.len() as i32 - 1 - lead + e)
+    // Below 1 ryu writes `0.000ddd`, so the significant digits start after the zeros.
+    let (mut digits, exp) = match int {
+        "0" => {
+            let sig = frac.trim_start_matches('0');
+            (sig.to_string(), e - 1 - (frac.len() - sig.len()) as i32)
+        }
+        _ => (format!("{int}{frac}"), e + int.len() as i32 - 1),
+    };
+    digits.truncate(digits.trim_end_matches('0').len());
+    (digits, exp)
 }
 
 fn dumps_with(value: &Value, formatter: PythonFormatter) -> String {

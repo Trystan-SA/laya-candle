@@ -129,16 +129,13 @@ pub fn device_from_env() -> Result<Device> {
 ///
 /// Ignores `LAYA_DEVICE` and never fails; prefer [`device_from_env`], which honours it.
 pub fn default_device() -> Device {
-    let compiled = || [CUDA, METAL].into_iter().filter(|a| a.compiled);
-    for Accelerator { name, new, .. } in compiled() {
-        match new(0) {
+    for accelerator in [CUDA, METAL].into_iter().filter(|a| a.compiled) {
+        match accelerator.open(0) {
             Ok(d) => return d,
-            Err(e) => {
-                eprintln!("[laya] built with `{name}` but {name}:0 did not open ({e}); trying next")
-            }
+            Err(e) => eprintln!("[laya] {e}; trying next"),
         }
     }
-    if compiled().next().is_some() {
+    if CUDA.compiled || METAL.compiled {
         eprintln!("[laya] no accelerator available; running on the CPU");
     }
     Device::Cpu
@@ -182,10 +179,18 @@ mod tests {
         assert!(DeviceChoice::Cpu.resolve().unwrap().is_cpu());
     }
 
-    #[cfg(not(feature = "cuda"))]
     #[test]
     fn an_explicit_gpu_without_its_feature_is_an_error_not_a_cpu_run() {
-        let err = DeviceChoice::Cuda(0).resolve().unwrap_err();
-        assert!(matches!(err, Error::Device(ref m) if m.contains("--features cuda")), "{err}");
+        let missing = [
+            (DeviceChoice::Cuda(0), CUDA, "cuda:0", "--features cuda"),
+            (DeviceChoice::Metal(1), METAL, "metal:1", "--features metal"),
+        ];
+        for (choice, _, name, flag) in missing.into_iter().filter(|(_, a, ..)| !a.compiled) {
+            let err = choice.resolve().unwrap_err();
+            assert!(
+                matches!(err, Error::Device(ref m) if m.contains(name) && m.contains(flag)),
+                "{err}"
+            );
+        }
     }
 }

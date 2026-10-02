@@ -158,60 +158,52 @@ impl Encoder {
 
         Ok(Item { ids, markers, qtype: q.kind, labels })
     }
-
-    /// Pad a batch of encoded questions into rectangular tensors' worth of data.
-    pub(crate) fn collate(&self, items: &[Item]) -> Batch {
-        let batch = items.len();
-        let seq_len = items.iter().map(|i| i.ids.len()).max().unwrap_or(0);
-        // A question with a single option still needs two slots: the action head reads a top-1
-        // and a top-2 probability, and the padded slot supplies the missing one as a hard zero.
-        let k_max = items.iter().map(|i| i.markers.len()).max().unwrap_or(0).max(2);
-
-        let mut input_ids = vec![self.sp.pad_id; batch * seq_len];
-        let mut attention_mask = vec![0f32; batch * seq_len];
-        let mut marker_pos = vec![0u32; batch * k_max];
-        let mut marker_mask = vec![0u8; batch * k_max];
-        let mut qtype = Vec::with_capacity(batch);
-        let mut n_tokens = 0;
-
-        for (r, it) in items.iter().enumerate() {
-            let row = r * seq_len;
-            for (c, &t) in it.ids.iter().enumerate() {
-                input_ids[row + c] = t;
-                attention_mask[row + c] = 1.0;
-            }
-            n_tokens += it.ids.len();
-            let mrow = r * k_max;
-            for (c, &m) in it.markers.iter().enumerate() {
-                marker_pos[mrow + c] = m as u32;
-                marker_mask[mrow + c] = 1;
-            }
-            qtype.push(it.qtype.index() as u32);
-        }
-
-        Batch {
-            input_ids,
-            attention_mask,
-            marker_pos,
-            marker_mask,
-            qtype,
-            batch,
-            seq_len,
-            k_max,
-            n_tokens,
-        }
-    }
 }
 
-/// A batch of encoded questions, padded rectangular.
+/// Lay a batch of encoded questions end to end, with no padding between them.
+pub(crate) fn collate(items: &[Item]) -> Batch {
+    let batch = items.len();
+    // A question with a single option still needs two slots: the action head reads a top-1
+    // and a top-2 probability, and the padded slot supplies the missing one as a hard zero.
+    let k_max = items.iter().map(|i| i.markers.len()).max().unwrap_or(0).max(2);
+    let n_tokens = items.iter().map(|i| i.ids.len()).sum();
+
+    let mut input_ids = Vec::with_capacity(n_tokens);
+    let mut lens = Vec::with_capacity(batch);
+    let mut marker_pos = vec![0u32; batch * k_max];
+    let mut marker_mask = vec![0u8; batch * k_max];
+    let mut qtype = Vec::with_capacity(batch);
+
+    for (r, it) in items.iter().enumerate() {
+        let start = input_ids.len();
+        input_ids.extend_from_slice(&it.ids);
+        lens.push(it.ids.len());
+
+        // Slots past the row's own markers read its `[CLS]`; the model masks them out.
+        let slots = &mut marker_pos[r * k_max..(r + 1) * k_max];
+        slots.fill(start as u32);
+        for (slot, &m) in slots.iter_mut().zip(&it.markers) {
+            *slot = (start + m) as u32;
+        }
+        marker_mask[r * k_max..r * k_max + it.markers.len()].fill(1);
+        qtype.push(it.qtype.index() as u32);
+    }
+
+    Batch { input_ids, lens, marker_pos, marker_mask, qtype, batch, k_max, n_tokens }
+}
+
+/// A batch of encoded questions, packed: every row's tokens follow the previous row's.
 pub(crate) struct Batch {
+    /// `[n_tokens]`, the rows end to end.
     pub input_ids: Vec<u32>,
-    pub attention_mask: Vec<f32>,
+    /// Tokens in each row.
+    pub lens: Vec<usize>,
+    /// `[batch, k_max]`, where each marker sits in `input_ids`.
     pub marker_pos: Vec<u32>,
+    /// `[batch, k_max]`, 1 on a row's own markers and 0 on the slots past them.
     pub marker_mask: Vec<u8>,
     pub qtype: Vec<u32>,
     pub batch: usize,
-    pub seq_len: usize,
     pub k_max: usize,
     pub n_tokens: usize,
 }
@@ -295,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn collate_pads_rows_and_reserves_two_marker_slots() {
+    fn collate_packs_rows_and_reserves_two_marker_slots() {
         let enc = encoder(64, 32);
         let state = enc.encode_state("hello world").unwrap();
         let one: Question = Question::choice("pick one").bare_option("a").into();
@@ -306,20 +298,27 @@ mod tests {
             enc.build(&state, "three", &three).unwrap(),
         ];
 
-        let batch = enc.collate(&items);
+        let batch = collate(&items);
         assert_eq!((batch.batch, batch.k_max), (2, 3));
-        assert_eq!(batch.seq_len, items[1].ids.len());
+        assert_eq!(batch.lens, vec![items[0].ids.len(), items[1].ids.len()]);
         assert_eq!(batch.n_tokens, items[0].ids.len() + items[1].ids.len());
 
-        // The shorter row is padded and masked out past its own tokens.
-        let (short, long) = (items[0].ids.len(), batch.seq_len);
-        assert!(batch.input_ids[short..long].iter().all(|&t| t == tiny_id("[PAD]")));
-        assert_eq!(batch.attention_mask[..long].iter().sum::<f32>() as usize, short);
+        // The second row starts right where the first ends, with no padding in between.
+        assert_eq!(batch.input_ids, [items[0].ids.clone(), items[1].ids.clone()].concat());
+        assert!(!batch.input_ids.contains(&tiny_id("[PAD]")));
+
+        // Markers index the packed ids; the slots past a row's own markers read its [CLS].
+        let start = items[0].ids.len() as u32;
+        let m = |row: usize, i: usize| items[row].markers[i] as u32;
+        assert_eq!(
+            batch.marker_pos,
+            [m(0, 0), 0, 0, start + m(1, 0), start + m(1, 1), start + m(1, 2)]
+        );
         assert_eq!(&batch.marker_mask, &[1, 0, 0, 1, 1, 1]);
         assert_eq!(batch.qtype, vec![0, 0]);
 
         // A single one-option question still gets two marker slots for the action head.
-        assert_eq!(enc.collate(&items[..1]).k_max, 2);
+        assert_eq!(collate(&items[..1]).k_max, 2);
     }
 
     #[test]

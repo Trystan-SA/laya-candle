@@ -117,8 +117,8 @@ fn main() -> Result<(), laya::Error> {
     println!(
         "\nRead the `vs 1 q` column honestly: every question is its own row in the batch and\n\
          carries its own copy of the state, so the encoder work does scale with the question\n\
-         count. Batching buys perhaps 1.5x in ms/question by filling the matrix multiplies\n\
-         better — it does not make the extra questions free.\n\n\
+         count. Batching buys 2-3x in ms/question by filling the matrix multiplies better —\n\
+         it does not make the extra questions free.\n\n\
          What the architecture buys is elsewhere: there is no decoding. The answer is read off\n\
          the [MASK] markers in the same pass, so cost is set by the input length, not by how\n\
          much an autoregressive model would have had to write.\n\n\

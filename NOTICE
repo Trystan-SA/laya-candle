@@ -9,6 +9,6 @@ from that project. The model checkpoints it loads (convaiinnovations/laya on
 the Hugging Face Hub) are published by the same authors under the same licence
 and are not redistributed here.
 
-The ModernBERT backbone implementation comes from candle-transformers
+The ModernBERT backbone implementation is adapted from candle-transformers
 (https://github.com/huggingface/candle), licensed under the Apache License,
 Version 2.0 / MIT.

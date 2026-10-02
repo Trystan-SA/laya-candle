@@ -64,7 +64,12 @@ required-features = ["hub"]
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
+# Both already in the tree through candle: the weights are read straight into f32 with them.
+half = "2.7.1"
+safetensors = "0.8.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
+# Already in the tree through candle; the fused CPU kernels split their rows across its pool.
+rayon = "1.12.0"
 # Shortest round-trip float digits, ties to even as Python's `repr`; tokenizers already pulls it in.
 ryu = "1.0.23"
 serde = { version = "1.0.229", features = ["derive"] }

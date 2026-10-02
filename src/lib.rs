@@ -76,9 +76,10 @@
 //! # Performance
 //!
 //! Everything runs in f32 through [candle](https://github.com/huggingface/candle). On a plain
-//! CPU build a prediction takes a second or more; enable the feature that matches your machine
-//! — `mkl` on Intel, `accelerate` on macOS, `cuda` or `metal` for a GPU — before drawing any
-//! conclusion about speed.
+//! CPU build a prediction takes a few hundred milliseconds, and seconds once the questions are
+//! many or the state is long; enable the feature that matches your machine — `mkl` on Intel,
+//! `accelerate` on macOS, `cuda` or `metal` for a GPU — before drawing any conclusion about
+//! speed.
 
 #![forbid(unsafe_code)]
 
@@ -95,6 +96,9 @@ pub mod pyjson;
 pub mod question;
 pub mod router;
 
+mod attention;
+mod encoder;
+mod kernels;
 mod model;
 mod sequence;
 #[cfg(test)]

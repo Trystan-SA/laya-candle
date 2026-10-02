@@ -81,7 +81,7 @@ impl Agent {
 
         // Read on the CPU first: `VarBuilder` moves each tensor to the target device as the
         // model asks for it, so a partially matching checkpoint never reaches VRAM.
-        let weights = candle_core::safetensors::load(&cp.weights, &Device::Cpu)?;
+        let weights = crate::model::load_weights(&cp.weights)?;
         verify(&weights, &cp.label)?;
         verify_layout(&weights, &cp.label, config.head_layers, enc_cfg.num_hidden_layers)?;
 
@@ -165,7 +165,7 @@ impl Agent {
             .map(|(id, q)| self.encoder.build(&state_ids, id, q))
             .collect::<Result<Vec<_>>>()?;
 
-        let batch = self.encoder.collate(&items);
+        let batch = crate::sequence::collate(&items);
         let out = self.model.forward(&batch)?;
 
         let mut answers = IndexMap::with_capacity(questions.len());

@@ -203,8 +203,8 @@ Everything runs in f32 on the CPU by default. On 24 cores, no BLAS:
 
 | | load | resident | 1 question | 15 questions |
 |---|---|---|---|---|
-| `english` | 2.1 s | 1.8 GiB | 1209 ms | 12.0 s (801 ms/q) |
-| `multilingual` | 2.7 s | 1.3 GiB | 606 ms | 7.3 s (486 ms/q) |
+| `english` | 0.8 s | 1.6 GiB | 324 ms | 2.0 s (135 ms/q) |
+| `multilingual` | 1.7 s | 1.3 GiB | 218 ms | 0.96 s (64 ms/q) |
 
 Enable the feature that matches your hardware before judging speed:
 
@@ -234,8 +234,10 @@ An accelerator asked for by name fails loudly if it cannot be opened (feature no
 driver missing, bad index); `auto` falls back to the CPU and prints a warning when a compiled-in
 accelerator did not open.
 
-Each question is its own batch row carrying a copy of the state, so 15 questions cost about 10x
-one. Sequences pad to the longest row in the batch, not to `max_len`.
+Each question is its own batch row carrying a copy of the state, so the encoder work grows with
+the question count. Rows are packed end to end rather than padded, so no layer spends anything on
+padding; on the CPU, attention runs through candle's variable-length kernel, which scores each
+row against itself only.
 
 ## Fidelity to the reference
 

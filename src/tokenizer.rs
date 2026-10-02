@@ -1,4 +1,4 @@
-//! Loading the checkpoint tokenizer and the four special tokens the sequence format needs.
+//! Loading the checkpoint tokenizer and the three special tokens the sequence format needs.
 
 use std::path::Path;
 
@@ -13,7 +13,6 @@ pub struct SpecialTokens {
     pub cls_id: u32,
     pub sep_id: u32,
     pub mask_id: u32,
-    pub pad_id: u32,
     /// The literal mask token, stripped out of any user text so it cannot forge a marker.
     pub mask_token: String,
 }
@@ -39,8 +38,8 @@ pub(crate) fn prepare(
     cfg: &Value,
     label: &str,
 ) -> Result<(Tokenizer, SpecialTokens)> {
-    // The sequence builder does its own truncation and padding; a `tokenizer.json` that ships
-    // either would otherwise pad every encode to `max_length` for nothing.
+    // The sequence builder does its own truncation, and batches are packed rather than padded;
+    // a `tokenizer.json` that ships either would otherwise pad every encode to `max_length`.
     tokenizer.with_truncation(None)?;
     tokenizer.with_padding(None);
 
@@ -66,9 +65,8 @@ pub(crate) fn prepare(
     let (cls_id, _) = resolve("cls_token", "[CLS]")?;
     let (sep_id, _) = resolve("sep_token", "[SEP]")?;
     let (mask_id, mask_token) = resolve("mask_token", "[MASK]")?;
-    let (pad_id, _) = resolve("pad_token", "[PAD]")?;
 
-    Ok((tokenizer, SpecialTokens { cls_id, sep_id, mask_id, pad_id, mask_token }))
+    Ok((tokenizer, SpecialTokens { cls_id, sep_id, mask_id, mask_token }))
 }
 
 #[cfg(test)]
@@ -82,8 +80,8 @@ mod tests {
         let dir = scratch_dir("tok-defaults");
         let (tok, sp) = load(&write_tiny_tokenizer(&dir, None), None).unwrap();
         assert_eq!(
-            (sp.cls_id, sp.sep_id, sp.mask_id, sp.pad_id),
-            (tiny_id("[CLS]"), tiny_id("[SEP]"), tiny_id("[MASK]"), tiny_id("[PAD]"))
+            (sp.cls_id, sp.sep_id, sp.mask_id),
+            (tiny_id("[CLS]"), tiny_id("[SEP]"), tiny_id("[MASK]"))
         );
         assert_eq!(sp.mask_token, "[MASK]");
         assert_eq!(
